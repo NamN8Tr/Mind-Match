@@ -1,0 +1,40 @@
+{
+  "name": "@smart-rot/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@clerk/backend": "^2.0.0",
+    "@colyseus/core": "^0.18.7",
+    "@colyseus/redis-driver": "^0.18.2",
+    "@colyseus/redis-presence": "^0.18.2",
+    "@colyseus/ws-transport": "^0.18.1",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@smart-rot/game-engines": "workspace:*",
+    "@smart-rot/rating-glicko2": "workspace:*",
+    "@smart-rot/shared-types": "workspace:*",
+    "express": "^5.0.0",
+    "fastify": "^5.12.1",
+    "ioredis": "^5.4.1",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "dotenv": "^16.4.5",
+    "prisma": "^7.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

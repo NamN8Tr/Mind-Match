@@ -1,0 +1,290 @@
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f232c;
+  --border: #2a2f3a;
+  --text: #e8eaed;
+  --text-dim: #9aa1ac;
+  --accent: #5b8cff;
+  --accent-dim: #2c3f73;
+  --correct: #4caf50;
+  --present: #c9a227;
+  --absent: #3a3f4b;
+  --danger: #e5484d;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+
+.site-main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.card + .card {
+  margin-top: 20px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rating-figure {
+  font-size: 2.2rem;
+  font-weight: 700;
+}
+
+.rating-deviation {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.btn:disabled {
+  background: var(--accent-dim);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.history-row:last-child {
+  border-bottom: none;
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.pill-win {
+  background: rgba(76, 175, 80, 0.18);
+  color: var(--correct);
+}
+
+.pill-loss {
+  background: rgba(229, 72, 77, 0.18);
+  color: var(--danger);
+}
+
+.pill-draw {
+  background: rgba(154, 161, 172, 0.18);
+  color: var(--text-dim);
+}
+
+/* Wordle board */
+
+.wordle-board {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+
+.wordle-row {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 6px;
+}
+
+.wordle-cell {
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.wordle-cell.correct {
+  background: var(--correct);
+  border-color: var(--correct);
+  color: #08130a;
+}
+
+.wordle-cell.present {
+  background: var(--present);
+  border-color: var(--present);
+  color: #1a1400;
+}
+
+.wordle-cell.absent {
+  background: var(--absent);
+  border-color: var(--absent);
+  color: var(--text-dim);
+}
+
+.wordle-cell.pending {
+  border-color: var(--accent);
+}
+
+.guess-form {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.guess-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: var(--text);
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  width: 180px;
+}
+
+.opponent-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 20px;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.opponent-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.opponent-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--absent);
+}
+
+.opponent-dot.filled {
+  background: var(--accent);
+}
+
+.match-result {
+  text-align: center;
+  margin-top: 24px;
+}
+
+.match-result h2 {
+  margin: 0 0 8px;
+}
+
+.spinner-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}

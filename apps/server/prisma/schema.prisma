@@ -1,0 +1,99 @@
+// Prisma schema for the ranked puzzle platform (Phase 1: users, per-game Glicko-2
+// ratings, and match history). See ../../README.md for the broader architecture.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id          String   @id @default(cuid())
+  /// Clerk user id. Null for bot accounts, which have no Clerk identity.
+  authSubject String?  @unique
+  displayName String
+  isBot       Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  ratings             Rating[]
+  matchParticipations MatchParticipant[]
+  wonMatches          Match[]            @relation("MatchWinner")
+
+  @@map("users")
+}
+
+/// One row per (user, game) pair. Ratings are never blended across games.
+model Rating {
+  id                  String   @id @default(cuid())
+  userId              String
+  /// Matches shared-types' GameId, e.g. "wordle". Kept as a plain string rather
+  /// than a Prisma enum so new game plugins don't require a migration.
+  gameId              String
+  rating              Float    @default(1500)
+  deviation           Float    @default(350)
+  volatility          Float    @default(0.06)
+  ratingPeriodsPlayed Int      @default(0)
+  updatedAt           DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameId])
+  @@index([gameId, rating])
+  @@map("ratings")
+}
+
+enum MatchStatus {
+  ACTIVE
+  COMPLETED
+  ABORTED
+}
+
+model Match {
+  id     String @id @default(cuid())
+  gameId String
+  /// Board/puzzle seed shared by every player in the match (see shared-seed principle).
+  seed   String
+
+  status      MatchStatus @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  completedAt DateTime?
+
+  /// Mirrors shared-types' MatchResult once the match ends.
+  resultStatus String?
+  resultReason String?
+  winnerId     String?
+  /// Final GameEngine state snapshot, for match history / replay.
+  finalState   Json?
+
+  winner       User?              @relation("MatchWinner", fields: [winnerId], references: [id])
+  participants MatchParticipant[]
+
+  @@index([gameId, createdAt])
+  @@map("matches")
+}
+
+/// Join row capturing each player's rating immediately before and after a match,
+/// so match history can show rating deltas without recomputing them later.
+model MatchParticipant {
+  id     String @id @default(cuid())
+  matchId String
+  userId  String
+  isBot   Boolean @default(false)
+
+  ratingBefore    Float
+  deviationBefore Float
+  ratingAfter     Float?
+  deviationAfter  Float?
+  /// 1 win / 0.5 draw / 0 loss, from this participant's perspective.
+  scoreForRating  Float?
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, userId])
+  @@index([userId])
+  @@map("match_participants")
+}
