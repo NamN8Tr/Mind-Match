@@ -10,3 +10,4 @@ dist/
 coverage/
 pnpm-lock.yaml.bak
 apps/server/src/generated/
+dump.rdb

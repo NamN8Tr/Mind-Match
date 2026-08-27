@@ -1,15 +1,15 @@
 import "dotenv/config";
-import Fastify from "fastify";
-import { registerAuthDecorators } from "./auth/fastify-plugin.js";
+import { buildApp } from "./app.js";
 import { createColyseusServer } from "./colyseus-server.js";
 import { env } from "./env.js";
-import { registerApiRoutes } from "./routes/api.js";
+import { abortStaleActiveMatches } from "./matchmaking/match-service.js";
 
 async function main(): Promise<void> {
-  const app = Fastify({ logger: true });
+  const app = await buildApp();
 
-  registerAuthDecorators(app);
-  await registerApiRoutes(app);
+  // Any match still ACTIVE at boot belonged to a previous process — its
+  // in-memory room is gone, so it can never complete normally.
+  await abortStaleActiveMatches();
 
   await app.listen({ port: env.port, host: "0.0.0.0" });
 

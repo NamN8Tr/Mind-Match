@@ -20,4 +20,9 @@ export const env = {
   redisUrl: required("REDIS_URL"),
   clerkSecretKey: required("CLERK_SECRET_KEY"),
   clerkPublishableKey: required("CLERK_PUBLISHABLE_KEY"),
+  // The web app calls this API cross-origin (different port in dev, different
+  // subdomain in prod), so the browser enforces CORS on every request. No
+  // wildcard default — an explicit origin is required so this can't silently
+  // end up permissive in production.
+  webOrigin: required("WEB_ORIGIN"),
 };

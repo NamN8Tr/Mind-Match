@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { matchMaker, QueueRoom, type Client, type QueueClientData, type QueueMatchGroup, type QueueOptions } from "@colyseus/core";
 import type { GameId, PlayerId } from "@smart-rot/shared-types";
-import { verifyClerkAuthToken } from "../auth/clerk.js";
+import { resolveAuthenticatedUser } from "../auth/clerk.js";
 import { getOrCreateRating } from "../rating/service.js";
+import { acquireSession, releaseSession } from "./session-lock.js";
 import { createPendingMatch } from "./match-service.js";
 
 interface MatchmakingJoinOptions {
@@ -37,10 +38,17 @@ function withinExpandingRatingWindow(client: QueueClientData, group: QueueMatchG
  */
 export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
   return class MatchmakingRoom extends QueueRoom {
+    /** Players handed off to a match room — onLeave should NOT release their session lock. */
+    private matchedUserIds = new Set<PlayerId>();
+
     override async onAuth(client: Client, options: MatchmakingJoinOptions): Promise<MatchmakingAuth> {
-      const userId = await verifyClerkAuthToken(options.authToken);
-      const rating = await getOrCreateRating(userId, gameId);
-      return { userId, rank: rating.rating };
+      const user = await resolveAuthenticatedUser(options.authToken);
+      const acquired = await acquireSession(gameId, user.id, "queue");
+      if (!acquired) {
+        throw new Error("You already have an active queue entry or match for this game");
+      }
+      const rating = await getOrCreateRating(user.id, gameId);
+      return { userId: user.id, rank: rating.rating };
     }
 
     override onCreate(options: Partial<QueueOptions>): void {
@@ -57,6 +65,13 @@ export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
       super.onJoin(client, { ...options, rank: auth.rank }, auth);
     }
 
+    override onLeave(client: Client): void {
+      const auth = client.auth as MatchmakingAuth | undefined;
+      if (auth && !this.matchedUserIds.has(auth.userId)) {
+        void releaseSession(gameId, auth.userId);
+      }
+    }
+
     private async createMatchRoom(group: QueueMatchGroup) {
       const players = await Promise.all(
         group.clients.map(async (client) => {
@@ -66,11 +81,29 @@ export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
         }),
       );
 
+      // Structurally shouldn't happen — the session lock rejects a second
+      // queue join for a user who already holds one — but a self-match is
+      // exactly the kind of thing worth refusing defensively rather than
+      // silently rating-updating a "match" against yourself.
+      if (players[0]!.userId === players[1]!.userId) {
+        throw new Error("Refusing to match a player against themselves");
+      }
+
       const seed = randomUUID();
       const matchId = await createPendingMatch(gameId, seed, players);
       const playerIds = players.map((p) => p.userId) as [PlayerId, PlayerId];
+      const room = await matchMaker.createRoom(matchRoomName, { matchId, seed, playerIds });
 
-      return matchMaker.createRoom(matchRoomName, { matchId, seed, playerIds });
+      // Only now are these players genuinely handed off, so onLeave should
+      // stop releasing their session locks (the match room owns that from
+      // here, via finalizeMatch). Marking them any earlier would strand the
+      // lock for its full TTL if match creation threw: QueueRoom kicks the
+      // clients on failure, and onLeave would then skip the release.
+      for (const player of players) {
+        this.matchedUserIds.add(player.userId);
+      }
+
+      return room;
     }
   };
 }
