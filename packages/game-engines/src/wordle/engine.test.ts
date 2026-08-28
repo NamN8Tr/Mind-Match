@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GameRuleViolation, type WordleStateView } from "@smart-rot/shared-types";
-import { wordleEngine } from "./engine.js";
+import { wordleEngine, wordleFewestGuessesEngine } from "./engine.js";
 import { evaluateGuess } from "./evaluate-guess.js";
 import { WORDLE_ANSWERS } from "./word-lists/answers.js";
 import { VALID_GUESSES } from "./word-lists/valid-guesses.js";
@@ -69,6 +69,8 @@ test("serializeStateForPlayer hides the opponent's guessed words but shows their
 
   const view = wordleEngine.serializeStateForPlayer(state, "p1") as WordleStateView;
   assert.equal(view.opponent.guessCount, 1);
+  assert.deepEqual(view.opponent.feedback, [evaluateGuess(wrongWord, state.answer)]);
+  assert.ok(!("guesses" in view.opponent), "the opponent's guessed words must stay private");
   assert.equal(view.self.guesses.length, 0);
   assert.equal(view.revealedAnswer, undefined, "answer should stay hidden mid-match");
   assert.ok(!("answer" in view));
@@ -82,9 +84,54 @@ test("serializeStateForPlayer reveals the answer once the match is terminal", ()
   assert.equal(view.revealedAnswer, state.answer);
 });
 
+test("serializeStateForPlayer reveals the answer when orchestration ends a non-terminal puzzle", () => {
+  const state = wordleEngine.generateInitialState("external-timeout", ["p1", "p2"]);
+
+  const view = wordleEngine.serializeStateForPlayer(state, "p1", { status: "draw", reason: "timeout" }) as WordleStateView;
+
+  assert.equal(wordleEngine.isTerminal(state), false, "the puzzle itself should still be in progress");
+  assert.equal(view.revealedAnswer, state.answer, "a final timeout view must reveal the hidden answer");
+});
+
 test("rejects a move after the player has already solved", () => {
   let state = wordleEngine.generateInitialState("double-solve-seed", ["p1", "p2"]);
   state = wordleEngine.applyMove(state, { type: "guess", word: state.answer }, "p1").state;
   const otherWord = VALID_GUESSES.find((w) => w !== state.answer)!;
   assert.throws(() => wordleEngine.validateMove(state, { type: "guess", word: otherWord }, "p1"), GameRuleViolation);
+});
+
+test("fewest-guesses waits for both players and awards the lower guess count", () => {
+  let state = wordleFewestGuessesEngine.generateInitialState("fewest-seed", ["p1", "p2"]);
+  const wrongWord = VALID_GUESSES.find((word) => word !== state.answer)!;
+
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: wrongWord }, "p1").state;
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: state.answer }, "p1").state;
+  assert.equal(wordleFewestGuessesEngine.isTerminal(state), false, "the first solver must wait for the opponent");
+
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: state.answer }, "p2").state;
+  assert.equal(wordleFewestGuessesEngine.isTerminal(state), true);
+  const result = wordleFewestGuessesEngine.getResult(state);
+  assert.equal(result.status, "win");
+  assert.equal(result.winnerId, "p2", "a later but more efficient solver should win");
+  assert.equal(result.reason, "fewest-guesses");
+});
+
+test("fewest-guesses draws when both players solve in the same number of guesses", () => {
+  let state = wordleFewestGuessesEngine.generateInitialState("fewest-tie-seed", ["p1", "p2"]);
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: state.answer }, "p1").state;
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: state.answer }, "p2").state;
+
+  const result = wordleFewestGuessesEngine.getResult(state);
+  assert.equal(result.status, "draw");
+  assert.equal(result.reason, "same-guesses");
+});
+
+test("fewest-guesses timeout awards a player who solved before the deadline", () => {
+  let state = wordleFewestGuessesEngine.generateInitialState("fewest-timeout-seed", ["p1", "p2"]);
+  state = wordleFewestGuessesEngine.applyMove(state, { type: "guess", word: state.answer }, "p1").state;
+
+  const result = wordleFewestGuessesEngine.getTimeoutResult!(state);
+  assert.equal(result.status, "win");
+  assert.equal(result.winnerId, "p1");
+  assert.equal(result.reason, "fewest-guesses-timeout");
 });

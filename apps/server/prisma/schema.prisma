@@ -19,29 +19,49 @@ model User {
   createdAt   DateTime @default(now())
 
   ratings             Rating[]
+  personalBests       PersonalBest[]
   matchParticipations MatchParticipant[]
   wonMatches          Match[]            @relation("MatchWinner")
 
   @@map("users")
 }
 
-/// One row per (user, game) pair. Ratings are never blended across games.
+/// Fastest server-timed successful solo run for one user/game/mode.
+model PersonalBest {
+  id         String   @id @default(cuid())
+  userId     String
+  gameId     String
+  mode       String
+  bestTimeMs Int
+  achievedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameId, mode])
+  @@index([userId])
+  @@map("personal_bests")
+}
+
+/// One row per (user, game, mode) pool. Ratings are never blended across games
+/// or across different rulesets within a game.
 model Rating {
   id                  String   @id @default(cuid())
   userId              String
   /// Matches shared-types' GameId, e.g. "wordle". Kept as a plain string rather
   /// than a Prisma enum so new game plugins don't require a migration.
   gameId              String
-  rating              Float    @default(1500)
-  deviation           Float    @default(350)
+  /// Game-specific ruleset, e.g. "speed" or "fewest-guesses".
+  mode                String
+  rating              Float    @default(400)
+  deviation           Float    @default(100)
   volatility          Float    @default(0.06)
   ratingPeriodsPlayed Int      @default(0)
   updatedAt           DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, gameId])
-  @@index([gameId, rating])
+  @@unique([userId, gameId, mode])
+  @@index([gameId, mode, rating])
   @@map("ratings")
 }
 
@@ -54,6 +74,8 @@ enum MatchStatus {
 model Match {
   id     String @id @default(cuid())
   gameId String
+  /// Game-specific ruleset selected before matchmaking, e.g. "speed".
+  mode   String @default("speed")
   /// Board/puzzle seed shared by every player in the match (see shared-seed principle).
   seed   String
 

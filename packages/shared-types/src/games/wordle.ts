@@ -1,6 +1,7 @@
 import type { PlayerId } from "../game-engine.js";
 
 export type LetterState = "correct" | "present" | "absent";
+export type WordleMode = "fewest-guesses" | "speed";
 
 export interface WordleGuessFeedback {
   guess: string;
@@ -20,11 +21,11 @@ export interface WordlePlayerState {
  * a single shared board.
  */
 export interface WordleState {
+  mode: WordleMode;
   answer: string;
   wordLength: number;
   maxGuesses: number;
   players: Record<PlayerId, WordlePlayerState>;
-  startedAt: number;
 }
 
 export interface WordleMove {
@@ -41,15 +42,19 @@ export interface WordlePlayerView {
 
 export interface WordleOpponentView {
   guessCount: number;
+  /** Letterless rows of color feedback. The opponent's actual words stay private. */
+  feedback: LetterState[][];
   solved: boolean;
   finishedAt?: number;
 }
 
 /**
  * Per-player view of WordleState. Never includes the opponent's guessed words,
- * only race progress; the answer itself is included only once the match is over.
+ * only letterless color feedback; the answer itself is included only once the
+ * match is over.
  */
 export interface WordleStateView {
+  mode: WordleMode;
   wordLength: number;
   maxGuesses: number;
   self: WordlePlayerView;

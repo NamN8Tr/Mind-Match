@@ -1,6 +1,14 @@
 import { Room, type Client, type Delayed } from "@colyseus/core";
-import { GameRuleViolation, type GameEngine, type GameId, type MatchResult, type PlayerId } from "@smart-rot/shared-types";
+import {
+  GameRuleViolation,
+  type GameEngine,
+  type GameId,
+  type MatchOpponentInfo,
+  type MatchResult,
+  type PlayerId,
+} from "@smart-rot/shared-types";
 import { resolveAuthenticatedUser } from "../auth/clerk.js";
+import { prisma } from "../db/prisma.js";
 import { finalizeMatch, type FinalizeMatchOutcome } from "../matchmaking/match-service.js";
 
 interface GameRoomCreateOptions {
@@ -21,11 +29,19 @@ interface GameRoomAuth {
 const JOIN_DEADLINE_MS = 30_000;
 /** How long a dropped connection has to reconnect before it's ruled a forfeit. */
 const RECONNECT_GRACE_SECONDS = 20;
+/** Ready-up window shown after both players arrive and before moves/timer begin. */
+const COUNTDOWN_MS = 3_000;
 /** Grace before tearing the room down, so the concluding messages actually reach both clients. */
 const DISPOSE_DELAY_MS = 5_000;
 
 export interface GameRoomOptions {
-  /** Wall-clock cap on a match once both players are ready; nobody solving in time is a draw. Default 5 minutes. */
+  /** Time allowed for both reserved players to connect and signal ready. Default 30 seconds. */
+  joinDeadlineMs?: number;
+  /** Time allowed for a dropped client to resume before forfeiting. Default 20 seconds. */
+  reconnectGraceSeconds?: number;
+  /** Ready-up countdown after both players are ready. Default 3 seconds. */
+  countdownMs?: number;
+  /** Wall-clock cap after the countdown ends; nobody solving in time is a draw. Default 5 minutes. */
   matchTimeoutMs?: number;
 }
 
@@ -41,6 +57,9 @@ export interface GameRoomOptions {
  * state to everyone, which doesn't fit.
  */
 export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roomOptions: GameRoomOptions = {}) {
+  const joinDeadlineMs = roomOptions.joinDeadlineMs ?? JOIN_DEADLINE_MS;
+  const reconnectGraceSeconds = roomOptions.reconnectGraceSeconds ?? RECONNECT_GRACE_SECONDS;
+  const countdownMs = roomOptions.countdownMs ?? COUNTDOWN_MS;
   const matchTimeoutMs = roomOptions.matchTimeoutMs ?? 5 * 60_000;
 
   return class GameRoom extends Room {
@@ -49,15 +68,21 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
     private matchId!: string;
     private playerIds!: [PlayerId, PlayerId];
     private gameState!: State;
+    private countdownStarted = false;
     private started = false;
     private finished = false;
     private playerIdBySessionId = new Map<string, PlayerId>();
+    private playerInfo = new Map<PlayerId, MatchOpponentInfo>();
     /** Players who have connected *and* confirmed their listeners are attached (see the "ready" handler). */
     private readyPlayerIds = new Set<PlayerId>();
     private joinDeadlineTimer?: Delayed;
+    private countdownTimer?: Delayed;
     private matchTimeoutTimer?: Delayed;
+    private countdownEndsAt?: number;
+    private matchStartedAt?: number;
+    private matchDeadlineAt?: number;
 
-    onCreate(options: GameRoomCreateOptions): void {
+    async onCreate(options: GameRoomCreateOptions): Promise<void> {
       this.matchId = options.matchId;
       this.playerIds = options.playerIds;
       this.gameState = engine.generateInitialState(options.seed, options.playerIds);
@@ -68,7 +93,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
 
       this.joinDeadlineTimer = this.clock.setTimeout(() => {
         if (!this.started) void this.concludeMatch({ status: "aborted", reason: "no-show" });
-      }, JOIN_DEADLINE_MS);
+      }, joinDeadlineMs);
 
       // A client announces itself with "ready" once its message listeners are
       // attached, and that — not the socket connecting — is what starts the
@@ -83,6 +108,18 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       this.onMessage<Move>("move", (client, move) => {
         this.handleMove(client, move);
       });
+
+      const participants = await prisma.matchParticipant.findMany({
+        where: { matchId: this.matchId },
+        include: { user: { select: { displayName: true } } },
+      });
+      for (const participant of participants) {
+        this.playerInfo.set(participant.userId, {
+          userId: participant.userId,
+          displayName: participant.user.displayName,
+          rating: participant.ratingBefore,
+        });
+      }
     }
 
     async onAuth(client: Client, options: GameRoomJoinOptions): Promise<GameRoomAuth> {
@@ -109,7 +146,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       if (this.finished) return;
       // Hold the seat open. A successful reconnect resumes via onReconnect; if
       // the window expires, Colyseus then calls onLeave, which forfeits.
-      this.allowReconnection(client, RECONNECT_GRACE_SECONDS).catch(() => {
+      this.allowReconnection(client, reconnectGraceSeconds).catch(() => {
         // Expected on timeout — onLeave does the real work.
       });
     }
@@ -139,17 +176,45 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       if (!playerId) return;
 
       this.readyPlayerIds.add(playerId);
-      client.send("phase", this.started ? "active" : "waiting");
+      client.send("phase", this.started ? "active" : this.countdownStarted ? "countdown" : "waiting");
+      this.sendOpponentTo(client, playerId);
       this.sendStateTo(client, playerId);
-
-      if (!this.started && this.readyPlayerIds.size === this.playerIds.length) {
-        this.started = true;
-        this.joinDeadlineTimer?.clear();
-        this.broadcast("phase", "active");
-        this.matchTimeoutTimer = this.clock.setTimeout(() => {
-          void this.handleMatchTimeout();
-        }, matchTimeoutMs);
+      if (this.started) {
+        this.sendClockTo(client);
+      } else if (this.countdownStarted) {
+        this.sendCountdownTo(client);
       }
+
+      if (!this.started && !this.countdownStarted && this.readyPlayerIds.size === this.playerIds.length) {
+        this.startCountdown();
+      }
+    }
+
+    private startCountdown(): void {
+      this.countdownStarted = true;
+      this.joinDeadlineTimer?.clear();
+      const serverNow = Date.now();
+      this.countdownEndsAt = serverNow + countdownMs;
+      this.broadcast("phase", "countdown");
+      this.broadcast("countdown", { endsAt: this.countdownEndsAt, serverNow });
+      this.countdownTimer = this.clock.setTimeout(() => this.beginMatch(), countdownMs);
+    }
+
+    private beginMatch(): void {
+      if (this.finished || this.started) return;
+      const now = Date.now();
+      if (this.countdownEndsAt !== undefined && now < this.countdownEndsAt) {
+        this.countdownTimer = this.clock.setTimeout(() => this.beginMatch(), this.countdownEndsAt - now);
+        return;
+      }
+      this.started = true;
+      this.matchStartedAt = now;
+      this.matchDeadlineAt = this.matchStartedAt + matchTimeoutMs;
+      this.broadcast("phase", "active");
+      this.broadcast("clock", { startedAt: this.matchStartedAt, deadlineAt: this.matchDeadlineAt, serverNow: Date.now() });
+      this.matchTimeoutTimer = this.clock.setTimeout(() => {
+        void this.handleMatchTimeout();
+      }, matchTimeoutMs);
     }
 
     private handleMove(client: Client, move: Move): void {
@@ -179,17 +244,35 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
 
     private handleMatchTimeout(): void {
       if (this.finished || engine.isTerminal(this.gameState)) return;
-      void this.concludeMatch({ status: "draw", reason: "timeout" });
+      void this.concludeMatch(engine.getTimeoutResult?.(this.gameState) ?? { status: "draw", reason: "timeout" });
     }
 
-    private sendStateTo(client: Client, userId: PlayerId): void {
-      client.send("state", engine.serializeStateForPlayer(this.gameState, userId));
+    private sendClockTo(client: Client): void {
+      if (this.matchStartedAt !== undefined && this.matchDeadlineAt !== undefined) {
+        client.send("clock", { startedAt: this.matchStartedAt, deadlineAt: this.matchDeadlineAt, serverNow: Date.now() });
+      }
     }
 
-    private broadcastState(): void {
+    private sendCountdownTo(client: Client): void {
+      if (this.countdownEndsAt !== undefined) {
+        client.send("countdown", { endsAt: this.countdownEndsAt, serverNow: Date.now() });
+      }
+    }
+
+    private sendOpponentTo(client: Client, userId: PlayerId): void {
+      const opponentId = this.playerIds.find((id) => id !== userId);
+      const opponent = opponentId ? this.playerInfo.get(opponentId) : undefined;
+      if (opponent) client.send("opponent", opponent);
+    }
+
+    private sendStateTo(client: Client, userId: PlayerId, matchResult?: MatchResult): void {
+      client.send("state", engine.serializeStateForPlayer(this.gameState, userId, matchResult));
+    }
+
+    private broadcastState(matchResult?: MatchResult): void {
       for (const client of this.clients) {
         const userId = this.playerIdBySessionId.get(client.sessionId);
-        if (userId) this.sendStateTo(client, userId);
+        if (userId) this.sendStateTo(client, userId, matchResult);
       }
     }
 
@@ -202,6 +285,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       if (this.finished) return;
       this.finished = true;
       this.joinDeadlineTimer?.clear();
+      this.countdownTimer?.clear();
       this.matchTimeoutTimer?.clear();
 
       let outcome: FinalizeMatchOutcome | null = null;
@@ -214,7 +298,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
         console.error(`Failed to finalize match ${this.matchId}:`, error);
       }
 
-      this.broadcastState();
+      this.broadcastState(outcome?.result ?? result);
       this.broadcast("result", {
         result: outcome?.result ?? result,
         ratings: outcome?.ratings ?? null,

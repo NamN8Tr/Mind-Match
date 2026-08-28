@@ -11,6 +11,7 @@ function toDomainRating(row: Rating): Glicko2Rating {
   return {
     userId: row.userId,
     gameId: row.gameId as GameId,
+    mode: row.mode,
     rating: row.rating,
     deviation: row.deviation,
     volatility: row.volatility,
@@ -19,18 +20,19 @@ function toDomainRating(row: Rating): Glicko2Rating {
   };
 }
 
-export async function getOrCreateRating(userId: string, gameId: GameId, db: Db = prisma): Promise<Glicko2Rating> {
-  const existing = await db.rating.findUnique({ where: { userId_gameId: { userId, gameId } } });
+export async function getOrCreateRating(userId: string, gameId: GameId, mode: string, db: Db = prisma): Promise<Glicko2Rating> {
+  const existing = await db.rating.findUnique({ where: { userId_gameId_mode: { userId, gameId, mode } } });
   if (existing) {
     return toDomainRating(existing);
   }
-  const initial = createInitialRating(userId, gameId);
+  const initial = createInitialRating(userId, gameId, mode);
   const created = await db.rating.upsert({
-    where: { userId_gameId: { userId, gameId } },
+    where: { userId_gameId_mode: { userId, gameId, mode } },
     update: {},
     create: {
       userId,
       gameId,
+      mode,
       rating: initial.rating,
       deviation: initial.deviation,
       volatility: initial.volatility,
@@ -46,16 +48,20 @@ export async function applyAndPersistMatchResult(
   playerAId: string,
   playerBId: string,
   gameId: GameId,
+  mode: string,
   outcome: MatchOutcome,
   db: Db = prisma,
 ): Promise<{ playerA: Glicko2Rating; playerB: Glicko2Rating }> {
-  const [ratingA, ratingB] = await Promise.all([getOrCreateRating(playerAId, gameId, db), getOrCreateRating(playerBId, gameId, db)]);
+  const [ratingA, ratingB] = await Promise.all([
+    getOrCreateRating(playerAId, gameId, mode, db),
+    getOrCreateRating(playerBId, gameId, mode, db),
+  ]);
 
   const updated = updateRatingsForMatch(ratingA, ratingB, outcome);
 
   await Promise.all([
     db.rating.update({
-      where: { userId_gameId: { userId: playerAId, gameId } },
+      where: { userId_gameId_mode: { userId: playerAId, gameId, mode } },
       data: {
         rating: updated.playerA.rating,
         deviation: updated.playerA.deviation,
@@ -64,7 +70,7 @@ export async function applyAndPersistMatchResult(
       },
     }),
     db.rating.update({
-      where: { userId_gameId: { userId: playerBId, gameId } },
+      where: { userId_gameId_mode: { userId: playerBId, gameId, mode } },
       data: {
         rating: updated.playerB.rating,
         deviation: updated.playerB.deviation,

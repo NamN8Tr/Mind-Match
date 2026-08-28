@@ -1,16 +1,37 @@
 "use client";
 
 import type { Room } from "@colyseus/sdk";
-import type { MatchResult, PlayerId, WordleMove, WordleStateView } from "@smart-rot/shared-types";
-import { useEffect, useState, type FormEvent } from "react";
+import type { MatchOpponentInfo, MatchResult, PlayerId, WordleMove, WordleStateView } from "@smart-rot/shared-types";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
+import { OpponentWordleBoard } from "./OpponentWordleBoard";
 import { WordleBoard } from "./WordleBoard";
+import { WordleKeyboard } from "./WordleKeyboard";
 
 interface MatchResultMessage {
   result: MatchResult;
   ratings: Record<PlayerId, { before: number; after: number }> | null;
   /** False when the server could not save the result — the shown outcome is real, the rating change isn't. */
   persisted: boolean;
+}
+
+interface ClockMessage {
+  startedAt: number;
+  deadlineAt: number;
+  serverNow: number;
+}
+
+interface SynchronizedClock extends ClockMessage {
+  offsetMs: number;
+}
+
+interface CountdownMessage {
+  endsAt: number;
+  serverNow: number;
+}
+
+interface SynchronizedCountdown extends CountdownMessage {
+  offsetMs: number;
 }
 
 interface MatchProps {
@@ -21,23 +42,56 @@ interface MatchProps {
 
 export function Match({ room, currentUserId, onExit }: MatchProps) {
   const [view, setView] = useState<WordleStateView | null>(null);
-  const [phase, setPhase] = useState<"waiting" | "active">("waiting");
+  const [opponent, setOpponent] = useState<MatchOpponentInfo | null>(null);
+  const [phase, setPhase] = useState<"waiting" | "countdown" | "active">("waiting");
   const [outcome, setOutcome] = useState<MatchResultMessage | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
+  const [submittingGuess, setSubmittingGuess] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
+  const [countdownClock, setCountdownClock] = useState<SynchronizedCountdown | null>(null);
+  const [matchClock, setMatchClock] = useState<SynchronizedClock | null>(null);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const selfGuessCountRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const offPhase = room.onMessage("phase", (value: "waiting" | "active") => setPhase(value));
+    selfGuessCountRef.current = null;
+    const offPhase = room.onMessage("phase", (value: "waiting" | "countdown" | "active") => {
+      setPhase(value);
+      if (value === "active") setCountdownClock(null);
+    });
+    const offCountdown = room.onMessage("countdown", (payload: CountdownMessage) => {
+      const receivedAt = Date.now();
+      setCountdownClock({ ...payload, offsetMs: payload.serverNow - receivedAt });
+      setClockNow(receivedAt);
+    });
+    const offClock = room.onMessage("clock", (payload: ClockMessage) => {
+      const receivedAt = Date.now();
+      setMatchClock({ ...payload, offsetMs: payload.serverNow - receivedAt });
+      setClockNow(receivedAt);
+    });
+    const offOpponent = room.onMessage("opponent", (payload: MatchOpponentInfo) => setOpponent(payload));
     const offState = room.onMessage("state", (payload: WordleStateView) => {
+      const previousGuessCount = selfGuessCountRef.current;
+      const nextGuessCount = payload.self.guesses.length;
+      selfGuessCountRef.current = nextGuessCount;
       setView(payload);
-      setMoveError(null);
+      if (previousGuessCount === null || nextGuessCount > previousGuessCount) {
+        setMoveError(null);
+        setInputValue("");
+        setSubmittingGuess(false);
+      }
     });
     const offResult = room.onMessage("result", (payload: MatchResultMessage) => {
+      setConnectionLost(false);
+      setMoveError(null);
+      setInputValue("");
+      setSubmittingGuess(false);
       setOutcome(payload);
       clearActiveMatch();
     });
     const offRejected = room.onMessage("moveRejected", (payload: { message: string }) => {
+      setSubmittingGuess(false);
       setMoveError(payload.message);
     });
     const handleLeave = (code: number) => {
@@ -47,11 +101,16 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       // JSX below only shows this banner while the match hasn't concluded.
       if (code < 4000) setConnectionLost(true);
     };
+    const handleDrop = () => {
+      setConnectionLost(true);
+      setSubmittingGuess(false);
+    };
     const handleReconnect = () => {
       setConnectionLost(false);
       room.send("ready");
     };
     room.onLeave(handleLeave);
+    room.onDrop(handleDrop);
     room.onReconnect(handleReconnect);
 
     // Listeners are attached — now ask the server for the opening snapshot.
@@ -62,26 +121,79 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
 
     return () => {
       offPhase();
+      offCountdown();
+      offClock();
+      offOpponent();
       offState();
       offResult();
       offRejected();
       room.onLeave.remove(handleLeave);
+      room.onDrop.remove(handleDrop);
       room.onReconnect.remove(handleReconnect);
     };
   }, [room]);
 
-  function submitGuess(event: FormEvent) {
-    event.preventDefault();
-    if (!view || phase !== "active" || view.self.solved || view.revealedAnswer) return;
-    const word = inputValue.trim().toLowerCase();
-    if (word.length !== view.wordLength) {
-      setMoveError(`Guess must be ${view.wordLength} letters`);
-      return;
+  useEffect(() => {
+    const shouldTick = (phase === "countdown" && countdownClock !== null) || (phase === "active" && matchClock !== null);
+    if (!shouldTick || outcome !== null) return;
+    const updateClock = () => setClockNow(Date.now());
+    updateClock();
+    const interval = window.setInterval(updateClock, 250);
+    return () => window.clearInterval(interval);
+  }, [countdownClock, matchClock, outcome, phase]);
+
+  const canPlay =
+    view !== null &&
+    phase === "active" &&
+    outcome === null &&
+    !connectionLost &&
+    !view.self.solved &&
+    view.self.guessesRemaining > 0 &&
+    !view.revealedAnswer;
+
+  const handleKey = useCallback(
+    (rawKey: string) => {
+      if (!canPlay || !view || submittingGuess) return;
+
+      const key = rawKey.toUpperCase();
+      if (key === "ENTER") {
+        if (inputValue.length !== view.wordLength) {
+          setMoveError(`Guess must be ${view.wordLength} letters`);
+          return;
+        }
+        const move: WordleMove = { type: "guess", word: inputValue.toLowerCase() };
+        setMoveError(null);
+        setSubmittingGuess(true);
+        room.send("move", move);
+        return;
+      }
+
+      if (key === "BACKSPACE" || key === "DELETE") {
+        setMoveError(null);
+        setInputValue((current) => current.slice(0, -1));
+        return;
+      }
+
+      if (/^[A-Z]$/.test(key)) {
+        setMoveError(null);
+        setInputValue((current) => (current.length < view.wordLength ? `${current}${key.toLowerCase()}` : current));
+      }
+    },
+    [canPlay, inputValue, room, submittingGuess, view],
+  );
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const supported = event.key === "Enter" || event.key === "Backspace" || event.key === "Delete" || /^[a-zA-Z]$/.test(event.key);
+      if (!supported || !canPlay || submittingGuess) return;
+      event.preventDefault();
+      handleKey(event.key);
     }
-    const move: WordleMove = { type: "guess", word };
-    room.send("move", move);
-    setInputValue("");
-  }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canPlay, handleKey, submittingGuess]);
 
   if (!view) {
     return (
@@ -100,9 +212,36 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
   const lost = result?.status === "win" && result.winnerId !== currentUserId;
   const aborted = result?.status === "aborted";
   const myRatingChange = ratings?.[currentUserId];
+  const countdownRemainingMs = countdownClock
+    ? Math.max(0, countdownClock.endsAt - (clockNow + countdownClock.offsetMs))
+    : null;
+  const countdownNumber = countdownRemainingMs === null ? 3 : Math.max(1, Math.ceil(countdownRemainingMs / 1000));
+  const remainingMs = matchClock ? Math.max(0, matchClock.deadlineAt - (clockNow + matchClock.offsetMs)) : null;
+  const remainingSeconds = remainingMs === null ? null : Math.ceil(remainingMs / 1000);
+  const formattedTime =
+    remainingSeconds === null
+      ? "--:--"
+      : `${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")}`;
+  const resultReason =
+    result?.reason === "fewest-guesses"
+      ? "Fewest guesses"
+      : result?.reason === "fewest-guesses-timeout"
+        ? "Solved before the deadline"
+        : result?.reason === "same-guesses"
+          ? "Same number of guesses"
+          : result?.reason === "solved"
+            ? "Fastest solve"
+            : result?.reason;
 
   return (
-    <div className="card">
+    <div className="card match-card">
+      {phase === "countdown" && !gameOver && (
+        <div className="round-countdown" role="status" aria-live="assertive">
+          <span>Get ready</span>
+          <strong key={countdownNumber}>{countdownNumber}</strong>
+        </div>
+      )}
+
       {connectionLost && !gameOver && (
         <p className="error-text" style={{ textAlign: "center", marginBottom: 12 }}>
           Connection lost — attempting to reconnect <span className="spinner-dot" />
@@ -115,36 +254,58 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
         </p>
       )}
 
-      <WordleBoard wordLength={view.wordLength} maxGuesses={view.maxGuesses} guesses={view.self.guesses} pendingInput={gameOver ? undefined : inputValue} />
-
-      <div className="opponent-track">
-        <span>Opponent:</span>
-        <div className="opponent-dots">
-          {Array.from({ length: view.maxGuesses }, (_, i) => (
-            <span key={i} className={`opponent-dot ${i < view.opponent.guessCount ? "filled" : ""}`} />
-          ))}
-        </div>
-        {view.opponent.solved && <span>solved it!</span>}
+      <div className="match-toolbar">
+        <span className={`match-mode-badge match-mode-${view.mode}`}>
+          {view.mode === "speed" ? "Speed" : "Fewest guesses"}
+        </span>
+        {view.mode === "speed" && !gameOver && (
+          <span className={`match-timer${remainingMs !== null && remainingMs <= 30_000 ? " urgent" : ""}`}>
+            <span aria-hidden="true">◷</span> {formattedTime}
+          </span>
+        )}
       </div>
 
-      {!gameOver && (
-        <form className="guess-form" onSubmit={submitGuess}>
-          <input
-            className="guess-input"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value.replace(/[^a-zA-Z]/g, "").slice(0, view.wordLength))}
-            maxLength={view.wordLength}
-            autoFocus
-            disabled={phase !== "active" || view.self.solved || view.self.guessesRemaining === 0}
-            placeholder={`${view.wordLength} letters`}
-          />
-          <button className="btn" type="submit" disabled={phase !== "active" || inputValue.length !== view.wordLength}>
-            Guess
-          </button>
-        </form>
+      {opponent && (
+        <div className="opponent-identity" aria-label={`Playing against ${opponent.displayName}, rating ${Math.round(opponent.rating)}`}>
+          <span>vs</span>
+          <strong>{opponent.displayName}</strong>
+          <span className="opponent-rating">{Math.round(opponent.rating)}</span>
+        </div>
       )}
 
-      {moveError && <p className="error-text" style={{ textAlign: "center", marginTop: 10 }}>{moveError}</p>}
+      <div className="match-boards">
+        <WordleBoard
+          wordLength={view.wordLength}
+          maxGuesses={view.maxGuesses}
+          guesses={view.self.guesses}
+          pendingInput={gameOver ? undefined : inputValue}
+        />
+        <OpponentWordleBoard
+          displayName={opponent?.displayName}
+          wordLength={view.wordLength}
+          maxGuesses={view.maxGuesses}
+          feedback={view.opponent.feedback}
+          solved={view.opponent.solved}
+        />
+      </div>
+
+      {view.mode === "fewest-guesses" && view.self.solved && !gameOver && (
+        <p className="match-progress-note">
+          Solved in {view.self.guesses.length} {view.self.guesses.length === 1 ? "guess" : "guesses"} — waiting for your opponent.
+        </p>
+      )}
+
+      {view.mode === "fewest-guesses" && !view.self.solved && view.self.guessesRemaining === 0 && !gameOver && (
+        <p className="match-progress-note">No guesses remaining — waiting for your opponent.</p>
+      )}
+
+      {!gameOver && <WordleKeyboard guesses={view.self.guesses} disabled={!canPlay || submittingGuess} onKey={handleKey} />}
+
+      {moveError && (
+        <p className="error-text" role="alert" style={{ textAlign: "center", marginTop: 10 }}>
+          {moveError}
+        </p>
+      )}
 
       {gameOver && (
         <div className="match-result">
@@ -156,7 +317,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
                 {" — "}
               </>
             )}
-            {result?.reason}
+            {resultReason}
           </p>
           {myRatingChange && (
             <p className="muted">
@@ -171,7 +332,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
             </p>
           )}
           <button className="btn-secondary" onClick={onExit} style={{ marginTop: 16 }}>
-            Back to lobby
+            Back to Wordle
           </button>
         </div>
       )}

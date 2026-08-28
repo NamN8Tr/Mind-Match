@@ -1,26 +1,32 @@
 # Smart Rot — Ranked Multiplayer Puzzle Platform
 
 Head-to-head ranked puzzle games (Wordle first, then Sudoku, Minesweeper, Spider
-Solitaire, …), chess.com-style: lobby, matchmaking, per-game Glicko-2 ratings,
+Solitaire, …), chess.com-style: lobby, matchmaking, per-mode Glicko-2 ratings,
 match history, bot opponents. No real-money features in this phase.
+
+For the full project history, implementation rationale, verified state, fixed
+test-account policy, and continuation plan, read
+[`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md) first.
 
 ## Status
 
-**Phase 1 (Wordle vertical slice) — complete and covered by automated tests,
-pending a manual two-account smoke test.**
+**Phase 1 (Wordle vertical slice) — implementation complete and covered by
+automated tests plus a live two-account backend/realtime smoke test; the release
+gate still requires a visual two-browser UI pass.**
 
 - [x] Monorepo scaffold (pnpm workspaces + Turborepo)
 - [x] `GameEngine` contract + shared domain types (`packages/shared-types`)
-- [x] Wordle engine plugin — deterministic seeded puzzle, 9 unit tests
+- [x] Wordle engine plugin — deterministic seeded puzzle, Speed + Fewest Guesses, 13 unit tests
 - [x] Glicko-2 rating engine — verified against the worked example in Glickman's paper
-- [x] Postgres schema (users, per-game ratings, match history) + migration
+- [x] Postgres schema (users, per-game-mode ratings, match history) + migrations
 - [x] Clerk auth with JIT user provisioning; REST API (`/api/me`, `/api/matches`) with CORS
 - [x] Matchmaking (expanding rating window), generic game-room factory, Wordle room
-- [x] Match lifecycle: join deadline, reconnect grace, match timeout, stale-match reaper
+- [x] Match lifecycle: join deadline, synchronized ready countdown, reconnect grace, match timeout, stale-match reaper
 - [x] Atomic + idempotent match finalization
-- [x] Web app: lobby, live match UI, refresh-safe reconnect
-- [x] 14 server tests (8 realtime integration + 6 REST), 14 package unit tests
-- [ ] **Manual smoke test with two real Clerk accounts** (see "Verification status")
+- [x] Web app: game catalog, Wordle modes, color-only opponent board, live match UI, refresh-safe reconnect
+- [x] 20 server tests (14 realtime integration + 6 REST), 19 package unit tests
+- [x] Live Clerk smoke with two fixed reusable test users (auth, queue, play, reconnect, ratings, history)
+- [ ] Visual two-browser UI smoke (see "Verification status")
 - [ ] Phase 2: Sudoku and Minesweeper
 - [ ] Phase 3: bots
 
@@ -51,8 +57,8 @@ lifecycle, reconnection, and state-sync semantics on a raw pub/sub transport.
 ### Per-player state sync is message-passing, not Colyseus schema sync
 
 `GameEngine.serializeStateForPlayer` deliberately returns a **different view per
-player** — a Wordle race exposes your opponent's *progress* but never their
-guessed words. Colyseus's `@colyseus/schema` sync broadcasts one shared state to
+player** — a Wordle race exposes your opponent's letterless color feedback but
+never their guessed words. Colyseus's `@colyseus/schema` sync broadcasts one shared state to
 everyone, which can't express that. So `createGameRoom` sends `client.send("state", view)`
 per client instead. Enforced by a test asserting the opponent view carries no words.
 
@@ -73,12 +79,14 @@ Handled generically in `createGameRoom` so every future game inherits it:
 
 | Situation | Behavior |
 | --- | --- |
-| Both players `ready` | Match starts; moves accepted; timeout clock starts |
-| Move before both ready | Rejected with a reason, never silently dropped |
+| Both players `ready` | Server broadcasts a synchronized 3–2–1 countdown |
+| Countdown ends | Match starts; moves are accepted; timeout clock starts |
+| Move before start or during countdown | Rejected with a reason, never silently dropped |
 | Nobody joins within 30s | Aborted, **no rating change** |
 | Connection drops | 20s reconnect grace; resuming restores full state |
 | Grace expires | Forfeit to the opponent |
-| Nobody solves in 5 min | Draw |
+| Speed deadline expires with no solve | Draw |
+| Fewest Guesses deadline expires | The only/lower-guess solver wins; otherwise draw |
 | Server restarts mid-match | `abortStaleActiveMatches()` reaps orphaned ACTIVE rows at boot |
 
 A user can hold only one queue entry or match per game at a time, enforced by a
@@ -93,6 +101,17 @@ single Prisma transaction — they all change or none do. Idempotency comes from
 conditional `status: "ACTIVE"` update: only the caller that actually flips the
 match out of ACTIVE applies the rating change, so a duplicate or concurrent
 finalize replays the stored outcome instead of awarding the delta twice.
+
+Ratings are keyed by `(userId, gameId, mode)`. Speed matchmaking reads and
+updates only the Speed pool; Fewest Guesses does the same with its own pool.
+Both begin at 400, and the lobby shows each value on its corresponding mode
+card. The per-game Redis session lock remains shared, so one account still
+cannot enter two Wordle queues simultaneously.
+
+New ratings begin with deviation 100. The opponent's rating and deviation feed
+Glicko-2's expected-score calculation, so movement is not a fixed amount: at
+the initial 400 rating, beating a 250 / 400 / 550 opponent currently awards
+about 16 / 26 / 36 points respectively. Losses mirror that relationship.
 
 Clients are told the outcome *only after* persistence succeeds. If it fails, the
 result message carries `persisted: false` and the UI says so rather than
@@ -155,9 +174,10 @@ pnpm --filter @smart-rot/web dev                # http://localhost:3000
 
 ```bash
 pnpm typecheck && pnpm lint && pnpm test && pnpm build
+pnpm --filter @smart-rot/server smoke:live
 ```
 
-`pnpm test` runs 28 tests: Wordle engine and Glicko-2 unit tests (no
+`pnpm test` runs 39 tests: Wordle engine and Glicko-2 unit tests (no
 infrastructure needed), plus the server suites, which need **Postgres and Redis
 running** — they exercise the real database and matchmaker rather than mocks.
 
@@ -169,21 +189,38 @@ users by prefix (`it-`, `api-`) so concurrent files never contend on the same
 rows, and cleans them up afterwards.
 
 Covered: Clerk-subject → internal-id mapping, distinct-user matchmaking, move
-rejection before both players are ready, state privacy between players, solving
+rejection before both players are ready and during the server countdown, state
+privacy between players, color-only opponent progress, solving
 to a win, exactly-once rating updates, finalization idempotency, forfeit on
-leave, reconnect within the grace period, no-show abort with no rating change,
-one-session-per-game enforcement, REST authorization, and the CORS contract.
+leave, reconnect within the grace period, forfeit after grace expiry,
+timer-driven no-show abort with no rating change, persisted match-timeout draw,
+final-answer reveal after an external timeout, one-session-per-game
+enforcement across modes, Speed's authoritative clock, Fewest Guesses waiting
+for both players and awarding the lower guess count, independent rating pools,
+opponent-sensitive rating movement, mode persistence, REST
+authorization, and the CORS contract.
+
+`smoke:live` crosses the boundary the ordinary suite intentionally fakes: it
+uses two real Clerk development users and genuine Clerk session JWTs against
+the running Fastify and Colyseus services. It reuses the same two
+`+clerk_test` addresses on every run, revokes only its temporary sessions, and
+never deletes or replaces the users. See the exact account policy and runbook
+in [`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md#fixed-clerk-test-account-policy).
 
 ### Verification status
 
 Automated tests and all four gates pass end to end against real Postgres and
-Redis. **Not yet verified: a live run with two real Clerk accounts in two
-browsers.** That path — real Clerk tokens, the Next.js UI, and the browser's own
-CORS enforcement — is the one thing the fake-auth seam cannot prove, and it
-needs Clerk API keys this repo doesn't ship. To do it: fill in real keys in both
-`.env` files, run both dev servers, sign in as two different users, and confirm
-queue → match → result → rating/history update, plus a mid-match refresh
-resuming rather than forfeiting.
+Redis. On August 27, 2026, the live smoke also passed with real Clerk JWTs:
+authenticated REST + CORS, distinct-user matchmaking, gameplay, a mid-match
+disconnect/reconnect with state recovery, atomic rating updates, and match
+history were all verified.
+
+**Not yet verified: the rendered Next.js/Clerk experience in two actual browser
+sessions.** The coding runtime had no attached browser backend, so the remaining
+manual pass is limited to sign-in components, client navigation, browser-native
+CORS behavior, responsive UI, and refresh UX. Run both dev servers, sign in as
+the two fixed test users from the context document, and confirm queue → canonical
+match URL → refresh/reconnect → result → rating/history in both sessions.
 
 ## Explicit non-goals for this phase
 

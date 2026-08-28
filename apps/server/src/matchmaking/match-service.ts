@@ -15,10 +15,11 @@ export interface PendingMatchPlayer {
  * each player's rating at the moment the match starts. Returns the new match id,
  * used as the Colyseus room's matchId.
  */
-export async function createPendingMatch(gameId: GameId, seed: string, players: PendingMatchPlayer[]): Promise<string> {
+export async function createPendingMatch(gameId: GameId, mode: string, seed: string, players: PendingMatchPlayer[]): Promise<string> {
   const match = await prisma.match.create({
     data: {
       gameId,
+      mode,
       seed,
       status: "ACTIVE",
       participants: {
@@ -112,8 +113,12 @@ export async function finalizeMatch(
       return { claimed: true, outcome: { result, ratings: null } satisfies FinalizeMatchOutcome };
     }
 
-    const [ratingA, ratingB] = await Promise.all([getOrCreateRating(playerAId, gameId, tx), getOrCreateRating(playerBId, gameId, tx)]);
-    const updated = await applyAndPersistMatchResult(playerAId, playerBId, gameId, outcomeFor(result, playerAId), tx);
+    const match = await tx.match.findUniqueOrThrow({ where: { id: matchId }, select: { mode: true } });
+    const [ratingA, ratingB] = await Promise.all([
+      getOrCreateRating(playerAId, gameId, match.mode, tx),
+      getOrCreateRating(playerBId, gameId, match.mode, tx),
+    ]);
+    const updated = await applyAndPersistMatchResult(playerAId, playerBId, gameId, match.mode, outcomeFor(result, playerAId), tx);
 
     await Promise.all([
       tx.matchParticipant.update({

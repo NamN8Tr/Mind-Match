@@ -155,6 +155,7 @@ export function computeGlicko2Update(player: Glicko2Rating, results: OpponentRes
   return {
     userId: player.userId,
     gameId: player.gameId,
+    mode: player.mode,
     rating: newMu * SCALE + DEFAULT_GLICKO2_RATING,
     deviation: newPhi * SCALE,
     volatility: newSigma,
@@ -187,10 +188,11 @@ export function updateRatingsForMatch(
   };
 }
 
-export function createInitialRating(userId: PlayerId, gameId: GameId): Glicko2Rating {
+export function createInitialRating(userId: PlayerId, gameId: GameId, mode: string): Glicko2Rating {
   return {
     userId,
     gameId,
+    mode,
     rating: DEFAULT_GLICKO2_RATING,
     deviation: DEFAULT_GLICKO2_DEVIATION,
     volatility: DEFAULT_GLICKO2_VOLATILITY,

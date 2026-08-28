@@ -68,9 +68,19 @@ export interface GameEngine<State, Move> {
   getResult(state: State): MatchResult;
 
   /**
-   * Produces the view of state sent to a specific player, e.g. hiding an
-   * opponent's in-progress guesses. Defaults to returning the full state
-   * unchanged when a game has nothing to hide.
+   * Optional game-specific result when the room's authoritative wall-clock
+   * deadline expires before `isTerminal()` becomes true. Games that omit this
+   * use a draw/timeout. This lets modes such as fewest-guesses award a player
+   * who solved before the deadline while their opponent did not.
    */
-  serializeStateForPlayer(state: State, playerId: PlayerId): unknown;
+  getTimeoutResult?(state: State): MatchResult;
+
+  /**
+   * Produces the view of state sent to a specific player, e.g. hiding an
+   * opponent's in-progress guesses. `matchResult` is present when orchestration
+   * ended the match outside the engine's own terminal rules (for example a
+   * wall-clock timeout or disconnect forfeit), allowing the final view to
+   * reveal information that must stay hidden during play.
+   */
+  serializeStateForPlayer(state: State, playerId: PlayerId, matchResult?: MatchResult): unknown;
 }

@@ -13,6 +13,7 @@ export interface MatchPlayer {
 export interface Match {
   id: string;
   gameId: GameId;
+  mode: string;
   seed: string;
   status: MatchStatus;
   players: MatchPlayer[];

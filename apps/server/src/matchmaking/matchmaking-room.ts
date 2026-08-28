@@ -36,7 +36,7 @@ function withinExpandingRatingWindow(client: QueueClientData, group: QueueMatchG
  * pre-wired for one game: rating-window compatibility, Clerk auth, and creating
  * the paired match (Postgres row + game Room) once a group of two is ready.
  */
-export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
+export function createMatchmakingRoom(gameId: GameId, mode: string, matchRoomName: string) {
   return class MatchmakingRoom extends QueueRoom {
     /** Players handed off to a match room — onLeave should NOT release their session lock. */
     private matchedUserIds = new Set<PlayerId>();
@@ -47,7 +47,7 @@ export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
       if (!acquired) {
         throw new Error("You already have an active queue entry or match for this game");
       }
-      const rating = await getOrCreateRating(user.id, gameId);
+      const rating = await getOrCreateRating(user.id, gameId, mode);
       return { userId: user.id, rank: rating.rating };
     }
 
@@ -76,7 +76,7 @@ export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
       const players = await Promise.all(
         group.clients.map(async (client) => {
           const auth = client.auth as MatchmakingAuth;
-          const rating = await getOrCreateRating(auth.userId, gameId);
+          const rating = await getOrCreateRating(auth.userId, gameId, mode);
           return { userId: auth.userId, ratingBefore: rating.rating, deviationBefore: rating.deviation };
         }),
       );
@@ -90,7 +90,7 @@ export function createMatchmakingRoom(gameId: GameId, matchRoomName: string) {
       }
 
       const seed = randomUUID();
-      const matchId = await createPendingMatch(gameId, seed, players);
+      const matchId = await createPendingMatch(gameId, mode, seed, players);
       const playerIds = players.map((p) => p.userId) as [PlayerId, PlayerId];
       const room = await matchMaker.createRoom(matchRoomName, { matchId, seed, playerIds });
 

@@ -20,7 +20,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             </Link>
             <div className="header-actions">
               <Show when="signed-in" fallback={<SignInButton mode="modal" />}>
-                <UserButton />
+                <div className="signed-in-actions">
+                  <Link className="profile-link" href="/profile">
+                    Profile
+                  </Link>
+                  <UserButton />
+                </div>
               </Show>
             </div>
           </header>

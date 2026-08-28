@@ -13,7 +13,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
 
   await app.register(cors, {
     origin: env.webOrigin,
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
   });
 

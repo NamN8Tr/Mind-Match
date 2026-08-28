@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import type { FastifyInstance } from "fastify";
+import { DEFAULT_GLICKO2_RATING } from "@smart-rot/shared-types";
 import { buildApp } from "../app.js";
 import { clerkAuth } from "../auth/clerk.js";
 import { prisma } from "../db/prisma.js";
@@ -64,7 +65,7 @@ test("/health is public", async () => {
   assert.deepEqual(response.json(), { status: "ok" });
 });
 
-test("/api/me returns the caller's internal id and seeds a default rating", async () => {
+test("/api/me returns the caller's internal id and seeds both mode ratings", async () => {
   const subject = `${USER_PREFIX}${randomUUID()}`;
   const response = await app.inject({
     method: "GET",
@@ -73,16 +74,24 @@ test("/api/me returns the caller's internal id and seeds a default rating", asyn
   });
 
   assert.equal(response.statusCode, 200);
-  const body = response.json() as { id: string; displayName: string; ratings: { gameId: string; rating: number; userId: string }[] };
+  const body = response.json() as {
+    id: string;
+    displayName: string;
+    ratings: { gameId: string; mode: string; rating: number; userId: string }[];
+  };
 
   const user = await prisma.user.findUniqueOrThrow({ where: { authSubject: subject } });
   assert.equal(body.id, user.id, "/api/me must report the internal user id, never the Clerk subject");
   assert.notEqual(body.id, subject);
 
-  const wordle = body.ratings.find((r) => r.gameId === "wordle");
-  assert.ok(wordle, "a new player should be seeded with a wordle rating");
-  assert.equal(wordle.rating, 1500);
-  assert.equal(wordle.userId, user.id, "ratings must be keyed by the internal user id");
+  const speed = body.ratings.find((rating) => rating.gameId === "wordle" && rating.mode === "speed");
+  const fewest = body.ratings.find((rating) => rating.gameId === "wordle" && rating.mode === "fewest-guesses");
+  assert.ok(speed, "a new player should be seeded with a Speed rating");
+  assert.ok(fewest, "a new player should be seeded with a Fewest Guesses rating");
+  assert.equal(speed.rating, DEFAULT_GLICKO2_RATING);
+  assert.equal(fewest.rating, DEFAULT_GLICKO2_RATING);
+  assert.equal(speed.userId, user.id, "ratings must be keyed by the internal user id");
+  assert.equal(fewest.userId, user.id, "both mode ratings must belong to the internal user id");
 });
 
 test("a preflight from the configured web origin is allowed with the Authorization header", async () => {

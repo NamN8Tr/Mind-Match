@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { Client, type Room, type SeatReservation } from "@colyseus/sdk";
-import { wordleEngine } from "@smart-rot/game-engines";
-import type { MatchResult, PlayerId } from "@smart-rot/shared-types";
+import { VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
+import type { MatchResult, PlayerId, WordleMode, WordleStateView } from "@smart-rot/shared-types";
 import { clerkAuth } from "./auth/clerk.js";
 import { createColyseusServer } from "./colyseus-server.js";
 import { prisma } from "./db/prisma.js";
-import { finalizeMatch } from "./matchmaking/match-service.js";
+import { finalizeMatch, getOrCreateRating } from "./matchmaking/match-service.js";
 import { redis } from "./redis.js";
 
 /**
@@ -35,6 +35,23 @@ import { redis } from "./redis.js";
  * which manifests as one file hanging on a row lock, not a clean failure.
  */
 const USER_PREFIX = "it-";
+const TEST_JOIN_DEADLINE_MS = 750;
+const TEST_RECONNECT_GRACE_SECONDS = 0.25;
+const TEST_COUNTDOWN_MS = 250;
+const TEST_MATCH_TIMEOUT_MS = 750;
+const SPEED_QUEUE = "wordle_speed_matchmaking";
+const FEWEST_GUESSES_QUEUE = "wordle_fewest_matchmaking";
+
+interface ClockMessage {
+  startedAt: number;
+  deadlineAt: number;
+  serverNow: number;
+}
+
+interface CountdownMessage {
+  endsAt: number;
+  serverNow: number;
+}
 
 interface ResultMessage {
   result: MatchResult;
@@ -86,18 +103,31 @@ interface MatchFixture {
   userBId: string;
   matchId: string;
   answer: string;
+  countdown: CountdownMessage;
+  clock: ClockMessage;
+}
+
+interface CountdownFixture {
+  roomA: Room;
+  roomB: Room;
+  countdown: CountdownMessage;
 }
 
 /** Runs the full queue -> pair -> both-ready flow and returns everything a test needs. */
-async function startMatch(port: number): Promise<MatchFixture> {
+async function startMatch(
+  port: number,
+  mode: WordleMode = "speed",
+  duringCountdown?: (fixture: CountdownFixture) => Promise<void>,
+): Promise<MatchFixture> {
   const subjectA = `${USER_PREFIX}${randomUUID()}`;
   const subjectB = `${USER_PREFIX}${randomUUID()}`;
 
   const clientA = new Client(`ws://localhost:${port}`);
   const clientB = new Client(`ws://localhost:${port}`);
 
-  const queueA = await clientA.joinOrCreate("wordle_matchmaking", { authToken: subjectA });
-  const queueB = await clientB.joinOrCreate("wordle_matchmaking", { authToken: subjectB });
+  const queueName = mode === "speed" ? SPEED_QUEUE : FEWEST_GUESSES_QUEUE;
+  const queueA = await clientA.joinOrCreate(queueName, { authToken: subjectA });
+  const queueB = await clientB.joinOrCreate(queueName, { authToken: subjectB });
 
   const [reservationA, reservationB] = await Promise.all([
     nextMessage<SeatReservation>(queueA, "seat"),
@@ -106,12 +136,18 @@ async function startMatch(port: number): Promise<MatchFixture> {
   assert.equal(reservationA.roomId, reservationB.roomId, "both players should be paired into the same match room");
 
   const [roomA, roomB] = await Promise.all([clientA.consumeSeatReservation(reservationA), clientB.consumeSeatReservation(reservationB)]);
+  queueA.send("confirm");
+  queueB.send("confirm");
 
   const activeA = waitForPhase(roomA, "active");
   const activeB = waitForPhase(roomB, "active");
+  const countdownA = nextMessage<CountdownMessage>(roomA, "countdown");
+  const clockA = nextMessage<ClockMessage>(roomA, "clock");
   ready(roomA);
   ready(roomB);
-  await Promise.all([activeA, activeB]);
+  const countdown = await countdownA;
+  await duringCountdown?.({ roomA, roomB, countdown });
+  const [, , clock] = await Promise.all([activeA, activeB, clockA]);
 
   const [userA, userB] = await Promise.all([
     prisma.user.findUniqueOrThrow({ where: { authSubject: subjectA } }),
@@ -129,13 +165,26 @@ async function startMatch(port: number): Promise<MatchFixture> {
     userAId: userA.id,
     userBId: userB.id,
     matchId: match.id,
-    answer: wordleEngine.generateInitialState(match.seed, [userA.id, userB.id]).answer,
+    answer: (mode === "speed" ? wordleEngine : wordleFewestGuessesEngine).generateInitialState(match.seed, [userA.id, userB.id]).answer,
+    countdown,
+    clock,
   };
 }
 
 const port = 18000 + Math.floor(Math.random() * 2000);
 const restoreClerk = installFakeClerk();
-const gameServer = createColyseusServer();
+// Room discovery is local to this test process. Sharing the dev gateway's
+// Redis driver would let either process claim a room named "wordle", yielding
+// a reservation whose endpoint is wrong for this randomly selected test port.
+const gameServer = createColyseusServer({
+  isolated: true,
+  gameRoom: {
+    joinDeadlineMs: TEST_JOIN_DEADLINE_MS,
+    reconnectGraceSeconds: TEST_RECONNECT_GRACE_SECONDS,
+    countdownMs: TEST_COUNTDOWN_MS,
+    matchTimeoutMs: TEST_MATCH_TIMEOUT_MS,
+  },
+});
 await gameServer.listen(port);
 
 after(async () => {
@@ -152,12 +201,95 @@ after(async () => {
 });
 
 test("distinct Clerk subjects resolve to distinct internal user ids, and matchmaking pairs them", async () => {
-  const { userAId, userBId, roomA, roomB } = await startMatch(port);
+  const { userAId, userBId, roomA, roomB, matchId, countdown, clock } = await startMatch(port);
   assert.notEqual(userAId, userBId, "distinct Clerk subjects must map to distinct internal users");
+  assert.equal(countdown.endsAt - countdown.serverNow, TEST_COUNTDOWN_MS, "both players must receive the server countdown");
+  assert.ok(clock.startedAt >= countdown.endsAt, "the match clock must not begin until the ready-up countdown ends");
+  assert.equal(clock.deadlineAt - clock.startedAt, TEST_MATCH_TIMEOUT_MS, "the room clock must use the authoritative match deadline");
+  const match = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  assert.equal(match.mode, "speed", "the selected queue mode must be persisted");
   // Guards the exact regression: matchmaking must key ratings by the internal
   // cuid, not the Clerk subject, or this row simply won't exist.
-  const ratings = await prisma.rating.findMany({ where: { userId: { in: [userAId, userBId] }, gameId: "wordle" } });
+  const ratings = await prisma.rating.findMany({
+    where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "speed" },
+  });
   assert.equal(ratings.length, 2, "both players should have a rating row keyed by their internal id");
+  roomA.leave();
+  roomB.leave();
+});
+
+test("moves are rejected throughout the ready-up countdown", async () => {
+  let rejected = false;
+  const { roomA, roomB } = await startMatch(port, "speed", async ({ roomA: countdownRoom }) => {
+    const rejection = nextMessage<{ message: string }>(countdownRoom, "moveRejected");
+    countdownRoom.send("move", { type: "guess", word: "crane" });
+    assert.match((await rejection).message, /hasn't started/i);
+    rejected = true;
+  });
+
+  assert.equal(rejected, true);
+  roomA.leave();
+  roomB.leave();
+});
+
+test("fewest-guesses lets a more efficient later solver beat the first solver", async () => {
+  const { roomA, roomB, userAId, userBId, matchId, answer } = await startMatch(port, "fewest-guesses");
+  const wrongWord = VALID_GUESSES.find((word) => word !== answer)!;
+
+  const aSawWrongGuess = nextMessage<WordleStateView>(roomA, "state");
+  roomA.send("move", { type: "guess", word: wrongWord });
+  await aSawWrongGuess;
+
+  const bSawOpponentSolve = new Promise<WordleStateView>((resolve) => {
+    const unsubscribe = roomB.onMessage("state", (state: WordleStateView) => {
+      if (!state.opponent.solved) return;
+      unsubscribe();
+      resolve(state);
+    });
+  });
+  roomA.send("move", { type: "guess", word: answer }); // A solves in two guesses.
+  assert.equal((await bSawOpponentSolve).opponent.solved, true);
+
+  const resultA = nextMessage<ResultMessage>(roomA, "result");
+  const resultB = nextMessage<ResultMessage>(roomB, "result");
+  roomB.send("move", { type: "guess", word: answer }); // B solves later, but in one guess.
+  const [outcomeA, outcomeB] = await Promise.all([resultA, resultB]);
+
+  assert.deepEqual(outcomeA, outcomeB);
+  assert.equal(outcomeA.result.status, "win");
+  assert.equal(outcomeA.result.winnerId, userBId);
+  assert.equal(outcomeA.result.reason, "fewest-guesses");
+
+  const [persisted, modeRatings] = await Promise.all([
+    prisma.match.findUniqueOrThrow({ where: { id: matchId } }),
+    prisma.rating.findMany({
+      where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "fewest-guesses" },
+    }),
+  ]);
+  assert.equal(persisted.mode, "fewest-guesses");
+  assert.equal(persisted.winnerId, userBId);
+  assert.equal(modeRatings.length, 2, "Fewest Guesses must use its own rating pool");
+
+  roomA.leave();
+  roomB.leave();
+});
+
+test("fewest-guesses timeout awards the only player who solved", async () => {
+  const { roomA, roomB, userAId, matchId, answer } = await startMatch(port, "fewest-guesses");
+
+  const resultA = nextMessage<ResultMessage>(roomA, "result");
+  const resultB = nextMessage<ResultMessage>(roomB, "result");
+  roomA.send("move", { type: "guess", word: answer });
+  const [outcomeA, outcomeB] = await Promise.all([resultA, resultB]);
+
+  assert.deepEqual(outcomeA, outcomeB);
+  assert.equal(outcomeA.result.status, "win");
+  assert.equal(outcomeA.result.winnerId, userAId);
+  assert.equal(outcomeA.result.reason, "fewest-guesses-timeout");
+
+  const persisted = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  assert.equal(persisted.resultReason, "fewest-guesses-timeout");
+
   roomA.leave();
   roomB.leave();
 });
@@ -165,11 +297,13 @@ test("distinct Clerk subjects resolve to distinct internal user ids, and matchma
 test("a player's state view never exposes the opponent's guessed words", async () => {
   const { roomA, roomB, answer } = await startMatch(port);
 
-  const bSeesAGuess = nextMessage<{ opponent: { guessCount: number } }>(roomB, "state");
+  const bSeesAGuess = nextMessage<WordleStateView>(roomB, "state");
   roomA.send("move", { type: "guess", word: answer });
   const bView = await bSeesAGuess;
 
   assert.equal(bView.opponent.guessCount, 1, "B should see that A has guessed");
+  assert.equal(bView.opponent.feedback.length, 1, "B should see A's color-only feedback row");
+  assert.deepEqual(bView.opponent.feedback[0], Array(5).fill("correct"));
   assert.ok(!("guesses" in bView.opponent), "but never which words A guessed");
 
   roomA.leave();
@@ -178,6 +312,10 @@ test("a player's state view never exposes the opponent's guessed words", async (
 
 test("solving first wins the match, updates both ratings, and persists exactly once", async () => {
   const { roomA, roomB, userAId, userBId, matchId, answer } = await startMatch(port);
+  const fewestBefore = await Promise.all([
+    getOrCreateRating(userAId, "wordle", "fewest-guesses"),
+    getOrCreateRating(userBId, "wordle", "fewest-guesses"),
+  ]);
 
   const resultA = nextMessage<ResultMessage>(roomA, "result");
   const resultB = nextMessage<ResultMessage>(roomB, "result");
@@ -209,10 +347,34 @@ test("solving first wins the match, updates both ratings, and persists exactly o
   const duplicate = await finalizeMatch(matchId, "wordle", [userAId, userBId], outcomeA.result, {});
   assert.deepEqual(duplicate.ratings, outcomeA.ratings, "a duplicate finalize should replay the stored outcome");
 
-  const ratingsNow = await prisma.rating.findMany({ where: { userId: { in: [userAId, userBId] }, gameId: "wordle" } });
+  const ratingsNow = await prisma.rating.findMany({
+    where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "speed" },
+  });
   for (const rating of ratingsNow) {
     assert.ok(Math.abs(rating.rating - outcomeA.ratings[rating.userId]!.after) < 1e-9, "duplicate finalize must not change a rating");
   }
+  const fewestAfter = await prisma.rating.findMany({
+    where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "fewest-guesses" },
+    orderBy: { userId: "asc" },
+  });
+  const sortedFewestBefore = [...fewestBefore].sort((a, b) => a.userId.localeCompare(b.userId));
+  assert.deepEqual(
+    fewestAfter.map(({ userId, rating, deviation, volatility, ratingPeriodsPlayed }) => ({
+      userId,
+      rating,
+      deviation,
+      volatility,
+      ratingPeriodsPlayed,
+    })),
+    sortedFewestBefore.map(({ userId, rating, deviation, volatility, ratingPeriodsPlayed }) => ({
+      userId,
+      rating,
+      deviation,
+      volatility,
+      ratingPeriodsPlayed,
+    })),
+    "a Speed result must not alter either player's Fewest Guesses rating",
+  );
 
   roomA.leave();
   roomB.leave();
@@ -224,13 +386,15 @@ test("moves are rejected until both players are ready", async () => {
   const clientA = new Client(`ws://localhost:${port}`);
   const clientB = new Client(`ws://localhost:${port}`);
 
-  const queueA = await clientA.joinOrCreate("wordle_matchmaking", { authToken: subjectA });
-  const queueB = await clientB.joinOrCreate("wordle_matchmaking", { authToken: subjectB });
+  const queueA = await clientA.joinOrCreate(SPEED_QUEUE, { authToken: subjectA });
+  const queueB = await clientB.joinOrCreate(SPEED_QUEUE, { authToken: subjectB });
   const [reservationA, reservationB] = await Promise.all([
     nextMessage<SeatReservation>(queueA, "seat"),
     nextMessage<SeatReservation>(queueB, "seat"),
   ]);
   const [roomA, roomB] = await Promise.all([clientA.consumeSeatReservation(reservationA), clientB.consumeSeatReservation(reservationB)]);
+  queueA.send("confirm");
+  queueB.send("confirm");
 
   // Only A signals ready, so the match must still be in "waiting".
   const waiting = nextMessage<string>(roomA, "phase");
@@ -266,11 +430,11 @@ test("a player leaving mid-match forfeits to the opponent", async () => {
 test("the same user cannot hold two queue entries for one game at once", async () => {
   const subject = `${USER_PREFIX}${randomUUID()}`;
   const client = new Client(`ws://localhost:${port}`);
-  const first = await client.joinOrCreate("wordle_matchmaking", { authToken: subject });
+  const first = await client.joinOrCreate(SPEED_QUEUE, { authToken: subject });
 
   await assert.rejects(
-    () => new Client(`ws://localhost:${port}`).joinOrCreate("wordle_matchmaking", { authToken: subject }),
-    "a second concurrent queue entry for the same user must be refused",
+    () => new Client(`ws://localhost:${port}`).joinOrCreate(FEWEST_GUESSES_QUEUE, { authToken: subject }),
+    "a second concurrent queue entry in another mode must be refused",
   );
 
   first.leave();
@@ -286,6 +450,7 @@ test("a player who reconnects within the grace period resumes the same match", a
 
   const client = new Client(`ws://localhost:${port}`);
   const token = roomA.reconnectionToken;
+  roomA.reconnection.enabled = false;
   await roomA.leave(false); // non-consented -> onDrop -> reconnection grace window
 
   const resumed = await client.reconnect(token);
@@ -312,23 +477,84 @@ test("a player who reconnects within the grace period resumes the same match", a
   roomB.leave();
 });
 
+test("a dropped player who misses the reconnect grace period forfeits exactly once", async () => {
+  const { roomA, roomB, userAId, userBId, matchId } = await startMatch(port);
+
+  const resultB = nextMessage<ResultMessage>(roomB, "result");
+  roomA.reconnection.enabled = false;
+  await roomA.leave(false); // abnormal drop; do not reconnect during the shortened test grace period
+  const outcome = await resultB;
+
+  assert.equal(outcome.persisted, true);
+  assert.equal(outcome.result.status, "win");
+  assert.equal(outcome.result.winnerId, userBId);
+  assert.equal(outcome.result.reason, "opponent-left");
+  assert.ok(outcome.ratings);
+
+  const duplicate = await finalizeMatch(matchId, "wordle", [userAId, userBId], outcome.result, {});
+  assert.deepEqual(duplicate.ratings, outcome.ratings, "a second terminal trigger must replay the forfeit rather than rate it twice");
+
+  const [persisted, ratings] = await Promise.all([
+    prisma.match.findUniqueOrThrow({ where: { id: matchId } }),
+    prisma.rating.findMany({ where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "speed" } }),
+  ]);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.winnerId, userBId);
+  for (const rating of ratings) {
+    assert.ok(Math.abs(rating.rating - outcome.ratings[rating.userId]!.after) < 1e-9, "the stored rating must equal the single reported update");
+  }
+
+  roomB.leave();
+});
+
+test("the match deadline records a persisted draw and reveals the answer", async () => {
+  const { roomA, roomB, userAId, userBId, matchId, answer } = await startMatch(port);
+
+  const finalStateA = nextMessage<WordleStateView>(roomA, "state");
+  const resultA = nextMessage<ResultMessage>(roomA, "result");
+  const resultB = nextMessage<ResultMessage>(roomB, "result");
+  const [state, outcomeA, outcomeB] = await Promise.all([finalStateA, resultA, resultB]);
+
+  assert.equal(state.revealedAnswer, answer, "an orchestration timeout should still reveal Wordle's hidden answer");
+  assert.deepEqual(outcomeA, outcomeB);
+  assert.equal(outcomeA.persisted, true);
+  assert.equal(outcomeA.result.status, "draw");
+  assert.equal(outcomeA.result.reason, "timeout");
+  assert.equal(outcomeA.result.winnerId, undefined);
+  assert.ok(outcomeA.ratings);
+  assert.equal(outcomeA.ratings[userAId]!.after, outcomeA.ratings[userAId]!.before);
+  assert.equal(outcomeA.ratings[userBId]!.after, outcomeA.ratings[userBId]!.before);
+
+  const persisted = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.resultStatus, "draw");
+  assert.equal(persisted.resultReason, "timeout");
+
+  roomA.leave();
+  roomB.leave();
+});
+
 test("a match abandoned before both players are ready aborts with no rating change", async () => {
   const subjectA = `${USER_PREFIX}${randomUUID()}`;
   const subjectB = `${USER_PREFIX}${randomUUID()}`;
   const clientA = new Client(`ws://localhost:${port}`);
   const clientB = new Client(`ws://localhost:${port}`);
 
-  const queueA = await clientA.joinOrCreate("wordle_matchmaking", { authToken: subjectA });
-  const queueB = await clientB.joinOrCreate("wordle_matchmaking", { authToken: subjectB });
+  const queueA = await clientA.joinOrCreate(SPEED_QUEUE, { authToken: subjectA });
+  const queueB = await clientB.joinOrCreate(SPEED_QUEUE, { authToken: subjectB });
   const [resA, resB] = await Promise.all([nextMessage<SeatReservation>(queueA, "seat"), nextMessage<SeatReservation>(queueB, "seat")]);
   const [roomA, roomB] = await Promise.all([clientA.consumeSeatReservation(resA), clientB.consumeSeatReservation(resB)]);
+  queueA.send("confirm");
+  queueB.send("confirm");
 
   const waiting = nextMessage<string>(roomA, "phase");
   ready(roomA); // B never readies
   await waiting;
 
   const userA = await prisma.user.findUniqueOrThrow({ where: { authSubject: subjectA } });
-  const ratingBefore = await prisma.rating.findUniqueOrThrow({ where: { userId_gameId: { userId: userA.id, gameId: "wordle" } } });
+  const ratingBefore = await prisma.rating.findUniqueOrThrow({
+    where: { userId_gameId_mode: { userId: userA.id, gameId: "wordle", mode: "speed" } },
+  });
   const match = await prisma.match.findFirstOrThrow({
     where: { participants: { some: { userId: userA.id } }, status: "ACTIVE" },
     orderBy: { createdAt: "desc" },
@@ -344,8 +570,66 @@ test("a match abandoned before both players are ready aborts with no rating chan
   const persisted = await prisma.match.findUniqueOrThrow({ where: { id: match.id } });
   assert.equal(persisted.status, "ABORTED");
 
-  const ratingAfter = await prisma.rating.findUniqueOrThrow({ where: { userId_gameId: { userId: userA.id, gameId: "wordle" } } });
+  const ratingAfter = await prisma.rating.findUniqueOrThrow({
+    where: { userId_gameId_mode: { userId: userA.id, gameId: "wordle", mode: "speed" } },
+  });
   assert.equal(ratingAfter.rating, ratingBefore.rating, "an aborted match must leave ratings untouched");
 
+  roomB.leave();
+});
+
+test("the join deadline aborts a no-show without changing ratings", async () => {
+  const subjectA = `${USER_PREFIX}${randomUUID()}`;
+  const subjectB = `${USER_PREFIX}${randomUUID()}`;
+  const clientA = new Client(`ws://localhost:${port}`);
+  const clientB = new Client(`ws://localhost:${port}`);
+
+  const queueA = await clientA.joinOrCreate(SPEED_QUEUE, { authToken: subjectA });
+  const queueB = await clientB.joinOrCreate(SPEED_QUEUE, { authToken: subjectB });
+  const [resA, resB] = await Promise.all([nextMessage<SeatReservation>(queueA, "seat"), nextMessage<SeatReservation>(queueB, "seat")]);
+  const [roomA, roomB] = await Promise.all([clientA.consumeSeatReservation(resA), clientB.consumeSeatReservation(resB)]);
+  queueA.send("confirm");
+  queueB.send("confirm");
+
+  const waiting = nextMessage<string>(roomA, "phase");
+  ready(roomA); // B connects but never confirms listener readiness.
+  assert.equal(await waiting, "waiting");
+
+  const [userA, userB] = await Promise.all([
+    prisma.user.findUniqueOrThrow({ where: { authSubject: subjectA } }),
+    prisma.user.findUniqueOrThrow({ where: { authSubject: subjectB } }),
+  ]);
+  const [ratingsBefore, match] = await Promise.all([
+    prisma.rating.findMany({
+      where: { userId: { in: [userA.id, userB.id] }, gameId: "wordle", mode: "speed" },
+      orderBy: { userId: "asc" },
+    }),
+    prisma.match.findFirstOrThrow({
+      where: { status: "ACTIVE", participants: { some: { userId: userA.id } } },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const resultA = nextMessage<ResultMessage>(roomA, "result");
+  const resultB = nextMessage<ResultMessage>(roomB, "result");
+  const [outcomeA, outcomeB] = await Promise.all([resultA, resultB]);
+
+  assert.deepEqual(outcomeA, outcomeB);
+  assert.equal(outcomeA.persisted, true);
+  assert.equal(outcomeA.result.status, "aborted");
+  assert.equal(outcomeA.result.reason, "no-show");
+  assert.equal(outcomeA.ratings, null);
+
+  const [persisted, ratingsAfter] = await Promise.all([
+    prisma.match.findUniqueOrThrow({ where: { id: match.id } }),
+    prisma.rating.findMany({
+      where: { userId: { in: [userA.id, userB.id] }, gameId: "wordle", mode: "speed" },
+      orderBy: { userId: "asc" },
+    }),
+  ]);
+  assert.equal(persisted.status, "ABORTED");
+  assert.deepEqual(ratingsAfter, ratingsBefore, "the timer-driven no-show must not mutate either rating row");
+
+  roomA.leave();
   roomB.leave();
 });

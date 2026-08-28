@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-timeout=25000 \"src/**/*.test.ts\"",
+    "smoke:live": "tsx src/scripts/live-clerk-smoke.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio"

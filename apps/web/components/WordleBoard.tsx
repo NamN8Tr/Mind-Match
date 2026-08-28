@@ -27,7 +27,11 @@ export function WordleBoard({ wordLength, maxGuesses, guesses, pendingInput }: W
       {rows.map((row, rowIndex) => (
         <div className="wordle-row" key={rowIndex}>
           {row.map((cell, cellIndex) => (
-            <div className={`wordle-cell ${cell.state}`} key={cellIndex}>
+            <div
+              aria-label={cell.letter ? `Letter ${cell.letter}` : "Empty letter"}
+              className={`wordle-cell ${cell.state}${cell.letter ? " filled" : ""}`}
+              key={cellIndex}
+            >
               {cell.letter}
             </div>
           ))}
