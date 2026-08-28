@@ -4,7 +4,10 @@ packages:
 allowBuilds:
   '@clerk/shared': true
   '@prisma/engines': true
+  bufferutil: false
+  core-js: false
   esbuild: true
   msgpackr-extract: true
   prisma: true
   unrs-resolver: true
+  utf-8-validate: false

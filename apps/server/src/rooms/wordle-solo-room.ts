@@ -6,7 +6,7 @@ import { resolveAuthenticatedUser } from "../auth/clerk.js";
 import { recordTimedPersonalBest } from "../personal-best/service.js";
 
 const COUNTDOWN_MS = 3_000;
-const RUN_TIMEOUT_MS = 5 * 60_000;
+const RUN_TIMEOUT_MS = 30 * 60_000;
 const RECONNECT_GRACE_SECONDS = 20;
 const DISPOSE_DELAY_MS = 5_000;
 
@@ -46,7 +46,6 @@ export function createWordleSoloRoom(options: WordleSoloRoomOptions = {}) {
     private runTimer?: Delayed;
 
     onCreate(): void {
-      this.autoDispose = false;
       this.onMessage("ready", (client) => this.handleReady(client));
       this.onMessage<WordleMove>("move", (client, move) => {
         void this.handleMove(client, move);
@@ -59,6 +58,7 @@ export function createWordleSoloRoom(options: WordleSoloRoomOptions = {}) {
     }
 
     onJoin(_client: Client, _options: unknown, auth: SoloAuth): void {
+      this.autoDispose = false;
       this.userId = auth.userId;
       this.gameState = wordleSpeedEngine.generateInitialState(seedFactory(), [auth.userId]);
     }

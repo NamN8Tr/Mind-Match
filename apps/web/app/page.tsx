@@ -30,6 +30,20 @@ export default function HomePage() {
             </span>
           </Link>
 
+          <Link className="game-card game-card-active game-card-spider" href="/games/spider">
+            <div className="game-card-icon game-card-icon-spider" aria-hidden="true">
+              <span>♠</span>
+            </div>
+            <div>
+              <div className="game-card-heading">
+                <h3>Spider Sprint</h3>
+                <span className="availability-pill">Play now</span>
+              </div>
+              <p>Race on identical, guaranteed-solvable one-suit Spider boards or chase a solo best.</p>
+            </div>
+            <span className="game-card-arrow" aria-hidden="true">→</span>
+          </Link>
+
           <article className="game-card game-card-disabled">
             <div className="game-card-icon game-card-icon-muted" aria-hidden="true">
               <span>9</span>

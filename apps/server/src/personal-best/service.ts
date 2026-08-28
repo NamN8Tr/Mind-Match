@@ -1,5 +1,6 @@
 import type { GameId, TimedPersonalBest } from "@smart-rot/shared-types";
 import { prisma } from "../db/prisma.js";
+import { Prisma } from "../generated/prisma/client.js";
 import type { Db } from "../rating/service.js";
 
 function toDomain(row: { gameId: string; mode: string; bestTimeMs: number; achievedAt: Date }): TimedPersonalBest {
@@ -23,22 +24,23 @@ export async function recordTimedPersonalBest(
   elapsedMs: number,
 ): Promise<{ personalBest: TimedPersonalBest; improved: boolean }> {
   const roundedElapsedMs = Math.max(1, Math.round(elapsedMs));
+  const achievedAt = new Date();
 
-  return prisma.$transaction(async (tx) => {
-    const existing = await tx.personalBest.findUnique({
-      where: { userId_gameId_mode: { userId, gameId, mode } },
+  try {
+    const created = await prisma.personalBest.create({
+      data: { userId, gameId, mode, bestTimeMs: roundedElapsedMs, achievedAt },
     });
+    return { personalBest: toDomain(created), improved: true };
+  } catch (error) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+  }
 
-    if (existing && existing.bestTimeMs <= roundedElapsedMs) {
-      return { personalBest: toDomain(existing), improved: false };
-    }
-
-    const achievedAt = new Date();
-    const personalBest = await tx.personalBest.upsert({
-      where: { userId_gameId_mode: { userId, gameId, mode } },
-      create: { userId, gameId, mode, bestTimeMs: roundedElapsedMs, achievedAt },
-      update: { bestTimeMs: roundedElapsedMs, achievedAt },
-    });
-    return { personalBest: toDomain(personalBest), improved: true };
+  const updated = await prisma.personalBest.updateMany({
+    where: { userId, gameId, mode, bestTimeMs: { gt: roundedElapsedMs } },
+    data: { bestTimeMs: roundedElapsedMs, achievedAt },
   });
+  const personalBest = await prisma.personalBest.findUniqueOrThrow({
+    where: { userId_gameId_mode: { userId, gameId, mode } },
+  });
+  return { personalBest: toDomain(personalBest), improved: updated.count > 0 };
 }

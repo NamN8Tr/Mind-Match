@@ -4,7 +4,14 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { Client, type Room, type SeatReservation } from "@colyseus/sdk";
 import { VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
-import type { MatchResult, PlayerId, WordleMode, WordleStateView } from "@smart-rot/shared-types";
+import type {
+  MatchOpponentInfo,
+  MatchResult,
+  PlayerId,
+  SoloResultMessage,
+  WordleMode,
+  WordleStateView,
+} from "@smart-rot/shared-types";
 import { clerkAuth } from "./auth/clerk.js";
 import { createColyseusServer } from "./colyseus-server.js";
 import { prisma } from "./db/prisma.js";
@@ -39,6 +46,7 @@ const TEST_JOIN_DEADLINE_MS = 750;
 const TEST_RECONNECT_GRACE_SECONDS = 0.25;
 const TEST_COUNTDOWN_MS = 250;
 const TEST_MATCH_TIMEOUT_MS = 750;
+const SOLO_TEST_SEED = "integration-solo-seed";
 const SPEED_QUEUE = "wordle_speed_matchmaking";
 const FEWEST_GUESSES_QUEUE = "wordle_fewest_matchmaking";
 
@@ -105,6 +113,8 @@ interface MatchFixture {
   answer: string;
   countdown: CountdownMessage;
   clock: ClockMessage;
+  opponentForA: MatchOpponentInfo;
+  opponentForB: MatchOpponentInfo;
 }
 
 interface CountdownFixture {
@@ -143,9 +153,11 @@ async function startMatch(
   const activeB = waitForPhase(roomB, "active");
   const countdownA = nextMessage<CountdownMessage>(roomA, "countdown");
   const clockA = nextMessage<ClockMessage>(roomA, "clock");
+  const opponentForAPromise = nextMessage<MatchOpponentInfo>(roomA, "opponent");
+  const opponentForBPromise = nextMessage<MatchOpponentInfo>(roomB, "opponent");
   ready(roomA);
   ready(roomB);
-  const countdown = await countdownA;
+  const [countdown, opponentForA, opponentForB] = await Promise.all([countdownA, opponentForAPromise, opponentForBPromise]);
   await duringCountdown?.({ roomA, roomB, countdown });
   const [, , clock] = await Promise.all([activeA, activeB, clockA]);
 
@@ -168,6 +180,8 @@ async function startMatch(
     answer: (mode === "speed" ? wordleEngine : wordleFewestGuessesEngine).generateInitialState(match.seed, [userA.id, userB.id]).answer,
     countdown,
     clock,
+    opponentForA,
+    opponentForB,
   };
 }
 
@@ -183,6 +197,11 @@ const gameServer = createColyseusServer({
     reconnectGraceSeconds: TEST_RECONNECT_GRACE_SECONDS,
     countdownMs: TEST_COUNTDOWN_MS,
     matchTimeoutMs: TEST_MATCH_TIMEOUT_MS,
+  },
+  soloRoom: {
+    countdownMs: TEST_COUNTDOWN_MS,
+    runTimeoutMs: TEST_MATCH_TIMEOUT_MS,
+    seedFactory: () => SOLO_TEST_SEED,
   },
 });
 await gameServer.listen(port);
@@ -201,7 +220,7 @@ after(async () => {
 });
 
 test("distinct Clerk subjects resolve to distinct internal user ids, and matchmaking pairs them", async () => {
-  const { userAId, userBId, roomA, roomB, matchId, countdown, clock } = await startMatch(port);
+  const { userAId, userBId, roomA, roomB, matchId, countdown, clock, opponentForA, opponentForB } = await startMatch(port);
   assert.notEqual(userAId, userBId, "distinct Clerk subjects must map to distinct internal users");
   assert.equal(countdown.endsAt - countdown.serverNow, TEST_COUNTDOWN_MS, "both players must receive the server countdown");
   assert.ok(clock.startedAt >= countdown.endsAt, "the match clock must not begin until the ready-up countdown ends");
@@ -214,8 +233,48 @@ test("distinct Clerk subjects resolve to distinct internal user ids, and matchma
     where: { userId: { in: [userAId, userBId] }, gameId: "wordle", mode: "speed" },
   });
   assert.equal(ratings.length, 2, "both players should have a rating row keyed by their internal id");
+  assert.equal(opponentForA.userId, userBId);
+  assert.equal(opponentForB.userId, userAId);
+  assert.match(opponentForA.displayName, new RegExp(`^${USER_PREFIX}`));
+  assert.equal(opponentForA.rating, ratings.find((rating) => rating.userId === userBId)!.rating);
   roomA.leave();
   roomB.leave();
+});
+
+test("Speed Solo records a server-timed personal best without creating a ranked match", async () => {
+  const subject = `${USER_PREFIX}${randomUUID()}`;
+  const client = new Client(`ws://localhost:${port}`);
+  const room = await client.create("wordle_speed_solo", { authToken: subject });
+  const initialState = nextMessage<WordleStateView>(room, "state");
+  const countdown = nextMessage<CountdownMessage>(room, "countdown");
+  const active = waitForPhase(room, "active");
+  const clock = nextMessage<ClockMessage>(room, "clock");
+  ready(room);
+  await Promise.all([initialState, countdown, active, clock]);
+
+  const user = await prisma.user.findUniqueOrThrow({ where: { authSubject: subject } });
+  const answer = wordleEngine.generateInitialState(SOLO_TEST_SEED, [user.id]).answer;
+  const finalState = nextMessage<WordleStateView>(room, "state");
+  const result = nextMessage<SoloResultMessage>(room, "soloResult");
+  room.send("move", { type: "guess", word: answer });
+  const [view, outcome] = await Promise.all([finalState, result]);
+
+  assert.equal(outcome.solved, true);
+  assert.equal(outcome.persisted, true);
+  assert.equal(outcome.isPersonalBest, true);
+  assert.ok(outcome.elapsedMs !== null && outcome.elapsedMs > 0);
+  assert.equal(outcome.bestTimeMs, outcome.elapsedMs);
+  assert.equal(view.revealedAnswer, answer);
+
+  const [personalBest, rankedMatches] = await Promise.all([
+    prisma.personalBest.findUniqueOrThrow({
+      where: { userId_gameId_mode: { userId: user.id, gameId: "wordle", mode: "speed" } },
+    }),
+    prisma.match.count({ where: { participants: { some: { userId: user.id } } } }),
+  ]);
+  assert.equal(personalBest.bestTimeMs, outcome.elapsedMs);
+  assert.equal(rankedMatches, 0, "solo runs must not create ranked match history");
+  room.leave();
 });
 
 test("moves are rejected throughout the ready-up countdown", async () => {

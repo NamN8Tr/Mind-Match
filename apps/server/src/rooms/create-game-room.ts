@@ -41,8 +41,13 @@ export interface GameRoomOptions {
   reconnectGraceSeconds?: number;
   /** Ready-up countdown after both players are ready. Default 3 seconds. */
   countdownMs?: number;
-  /** Wall-clock cap after the countdown ends; nobody solving in time is a draw. Default 5 minutes. */
+  /** Wall-clock cap after the countdown ends; nobody solving in time is a draw. Default 30 minutes. */
   matchTimeoutMs?: number;
+  /**
+   * Ranked races normally forfeit a departed player. Spider instead keeps the
+   * board alive for the remaining player and only draws when both have left.
+   */
+  departurePolicy?: "forfeit" | "continue-until-both-leave";
 }
 
 /**
@@ -60,7 +65,8 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
   const joinDeadlineMs = roomOptions.joinDeadlineMs ?? JOIN_DEADLINE_MS;
   const reconnectGraceSeconds = roomOptions.reconnectGraceSeconds ?? RECONNECT_GRACE_SECONDS;
   const countdownMs = roomOptions.countdownMs ?? COUNTDOWN_MS;
-  const matchTimeoutMs = roomOptions.matchTimeoutMs ?? 5 * 60_000;
+  const matchTimeoutMs = roomOptions.matchTimeoutMs ?? 30 * 60_000;
+  const departurePolicy = roomOptions.departurePolicy ?? "forfeit";
 
   return class GameRoom extends Room {
     maxClients = 2;
@@ -75,6 +81,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
     private playerInfo = new Map<PlayerId, MatchOpponentInfo>();
     /** Players who have connected *and* confirmed their listeners are attached (see the "ready" handler). */
     private readyPlayerIds = new Set<PlayerId>();
+    private departedPlayerIds = new Set<PlayerId>();
     private joinDeadlineTimer?: Delayed;
     private countdownTimer?: Delayed;
     private matchTimeoutTimer?: Delayed;
@@ -164,6 +171,15 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
 
       if (!this.started) {
         void this.concludeMatch({ status: "aborted", reason: "no-show" });
+        return;
+      }
+
+      if (departurePolicy === "continue-until-both-leave") {
+        this.departedPlayerIds.add(playerId);
+        this.broadcast("playerLeft", { playerId });
+        if (this.departedPlayerIds.size === this.playerIds.length) {
+          void this.concludeMatch({ status: "draw", reason: "both-left" });
+        }
         return;
       }
 

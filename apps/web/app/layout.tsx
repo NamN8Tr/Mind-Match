@@ -1,7 +1,8 @@
-import { ClerkProvider, Show, SignInButton, UserButton } from "@clerk/nextjs";
+import { ClerkProvider } from "@clerk/nextjs";
 import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { AccountMenu } from "../components/AccountMenu";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +12,13 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <ClerkProvider>
+    <ClerkProvider
+      appearance={{
+        options: {
+          unsafe_disableDevelopmentModeWarnings: process.env.NODE_ENV === "development",
+        },
+      }}
+    >
       <html lang="en">
         <body>
           <header className="site-header">
@@ -19,14 +26,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               Smart Rot
             </Link>
             <div className="header-actions">
-              <Show when="signed-in" fallback={<SignInButton mode="modal" />}>
-                <div className="signed-in-actions">
-                  <Link className="profile-link" href="/profile">
-                    Profile
-                  </Link>
-                  <UserButton />
-                </div>
-              </Show>
+              <div className="signed-in-actions">
+                <AccountMenu />
+              </div>
             </div>
           </header>
           <main className="site-main">{children}</main>

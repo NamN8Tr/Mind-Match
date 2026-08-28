@@ -11,7 +11,12 @@ import { getMatchHistory, getMe, type MatchHistoryEntry, type MeResponse } from 
 import { saveActiveMatch } from "../lib/match-storage";
 import { setPendingMatchRoom } from "../lib/pending-match";
 
-type Phase = "idle" | "queueing";
+type Phase = "idle" | "queueing" | "starting-solo";
+
+function formatTime(milliseconds: number): string {
+  const totalTenths = Math.floor(milliseconds / 100);
+  return `${Math.floor(totalTenths / 600)}:${String(Math.floor((totalTenths % 600) / 10)).padStart(2, "0")}.${totalTenths % 10}`;
+}
 
 const WORDLE_MODES: Array<{
   id: WordleMode;
@@ -170,6 +175,23 @@ export function Lobby() {
     setQueueMode(null);
   }
 
+  async function startSolo() {
+    setError(null);
+    setPhase("starting-solo");
+    try {
+      const token = await getToken();
+      const room = await getColyseusClient().create("wordle_speed_solo", { authToken: token });
+      setPendingMatchRoom(room);
+      saveActiveMatch(room.roomId, room.reconnectionToken);
+      router.push(`/solo/wordle/${room.roomId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start a solo run");
+      setPhase("idle");
+    }
+  }
+
+  const speedSoloBest = me?.personalBests.find((best) => best.gameId === "wordle" && best.mode === "speed");
+
   return (
     <div className="stack">
       <Link className="back-link" href="/">
@@ -185,6 +207,22 @@ export function Lobby() {
       </section>
 
       <section className="mode-grid" aria-label="Wordle modes">
+        <article className="mode-card mode-card-solo">
+          <div className="mode-card-topline">
+            <span className="mode-icon" aria-hidden="true">
+              ◎
+            </span>
+            <span className="mode-kicker">Personal best</span>
+            <span className="mode-rating" aria-label="Solo personal best">
+              <strong>{speedSoloBest ? formatTime(speedSoloBest.bestTimeMs) : "—"}</strong>
+            </span>
+          </div>
+          <h2>Solo</h2>
+          <p>Solve a server-timed Wordle on your own. Successful runs can set a new personal best and never affect rating.</p>
+          <button className="btn mode-button" onClick={startSolo} disabled={!me || phase !== "idle"}>
+            {phase === "starting-solo" ? "Starting…" : "Start Solo Run"}
+          </button>
+        </article>
         {WORDLE_MODES.map((mode) => {
           const searching = phase === "queueing" && queueMode === mode.id;
           const modeRating = me?.ratings.find((rating) => rating.gameId === "wordle" && rating.mode === mode.id);
@@ -248,7 +286,13 @@ export function Lobby() {
           return (
             <div className="history-row" key={entry.matchId}>
               <span className="history-opponent">
-                <span>vs {opponent?.displayName ?? "unknown"}</span>
+                {opponent ? (
+                  <Link className="player-profile-link" href={`/players/${encodeURIComponent(opponent.userId)}`}>
+                    vs {opponent.displayName}
+                  </Link>
+                ) : (
+                  <span>vs unknown</span>
+                )}
                 <span className="history-mode">{entry.mode === "fewest-guesses" ? "Fewest guesses" : "Speed"}</span>
               </span>
               {entry.status === "COMPLETED" ? (

@@ -4,7 +4,7 @@ export type PlayerId = string;
  * Stable identifier for a game type. Extend this union as new game plugins
  * (Sudoku, Minesweeper, Spider Solitaire, ...) come online in later phases.
  */
-export type GameId = "wordle";
+export type GameId = "wordle" | "spider";
 
 export type MatchOutcomeStatus = "win" | "draw" | "aborted";
 

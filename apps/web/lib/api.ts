@@ -29,6 +29,22 @@ export interface MatchHistoryEntry {
   players: MatchHistoryPlayer[];
 }
 
+export interface PublicPlayerProfile {
+  id: string;
+  displayName: string;
+  isBot: boolean;
+  createdAt: string;
+  ratings: Glicko2Rating[];
+  personalBests: TimedPersonalBest[];
+  stats: {
+    rankedMatches: number;
+    wins: number;
+    draws: number;
+    losses: number;
+  };
+  matches: MatchHistoryEntry[];
+}
+
 async function apiFetch<T>(path: string, token: string | null, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -56,6 +72,14 @@ export function updateUsername(token: string | null, username: string): Promise<
   });
 }
 
+export function deleteMe(token: string | null): Promise<{ deleted: true }> {
+  return apiFetch<{ deleted: true }>("/api/me", token, { method: "DELETE" });
+}
+
 export function getMatchHistory(token: string | null, gameId = "wordle"): Promise<MatchHistoryEntry[]> {
   return apiFetch<MatchHistoryEntry[]>(`/api/matches?gameId=${encodeURIComponent(gameId)}`, token);
+}
+
+export function getPlayerProfile(token: string | null, userId: string): Promise<PublicPlayerProfile> {
+  return apiFetch<PublicPlayerProfile>(`/api/players/${encodeURIComponent(userId)}`, token);
 }

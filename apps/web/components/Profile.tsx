@@ -93,7 +93,7 @@ export function Profile() {
         {error && <p className="error-text">{error}</p>}
       </section>
 
-      <section className="card profile-section">
+      <section className="card profile-section" id="personal-bests">
         <div className="profile-section-heading">
           <div>
             <h2>Personal bests</h2>

@@ -13,8 +13,9 @@ same investigation.
 Smart Rot is a ranked, head-to-head puzzle platform modeled on the product loop
 of chess sites: authenticate, enter a game-specific matchmaking queue, play a
 short server-authoritative match, receive a per-game-mode rating update, and review
-match history. Wordle is the proving vertical slice. The planned order after it
-is Sudoku, Minesweeper, bots, then Spider Solitaire and additional games.
+match history. Timed modes also support unranked solo runs and server-recorded
+personal bests. Wordle is the proving vertical slice. The planned order after
+it is Sudoku, Minesweeper, bots, then Spider Solitaire and additional games.
 
 The durable product rules from the original brief are:
 
@@ -165,7 +166,7 @@ The original execution plan required three timer paths that the first 28 tests
 did not exercise directly: the join deadline firing on its own, a dropped
 client exhausting the reconnect grace period, and the match deadline producing
 a draw. Room timings can now be injected into an integration-only server while
-the production defaults remain 30 seconds, 20 seconds, and 5 minutes.
+the production defaults remain 30 seconds, 20 seconds, and 30 minutes.
 
 Three realtime tests now prove:
 
@@ -271,7 +272,9 @@ inherit the strongest known absent/present/correct feedback across guesses.
 
 The server remains authoritative: the client only builds a pending word and
 sends the existing `WordleMove` on Enter. Invalid words stay in the row so the
-player can edit them. Because every accepted move broadcasts a private snapshot
+player can edit them. Rejected guesses now use a compact white toast with black
+text above the boards in ranked and solo play; it fades after 2.2 seconds
+instead of leaving red text below the keyboard. Because every accepted move broadcasts a private snapshot
 to both players, the client tracks its own submitted-guess count and clears the
 pending row only when that count advances; an opponent move cannot erase a word
 currently being typed. Web typecheck, ESLint, and the Next production build pass
@@ -325,9 +328,10 @@ a new one.
 
 Engine and two-client integration assertions cover color feedback privacy, the
 countdown duration, delayed match-clock start, and rejection of countdown moves.
-The full repository now has 39 tests: 20 server tests and 19 package tests. The
+At this milestone the repository had 39 tests: 20 server tests and 19 package
+tests. The current totals are recorded in the verification matrix below. The
 mode migration was applied locally; typecheck, ESLint, tests, and both production
-builds pass.
+builds passed.
 
 ### 14. Independent ratings for each mode
 
@@ -357,6 +361,57 @@ Migration `20260828021000_lower_initial_rating_deviation` changes the database
 default and resets the current local test pools to deviation 100. A regression
 test locks in both moderate equal-player movement and the stronger/equal/weaker
 opponent ordering.
+
+### 16. Editable profiles, visible opponent identity, and Speed Solo
+
+Signed-in users now have a `/profile` page. `PATCH /api/me` updates the internal
+`User.displayName` after trimming it and validating 3–20 letters, numbers,
+underscores, or hyphens. This does not create or rename a Clerk user. Match
+history reads the same display name, and ranked rooms privately send each
+client its opponent's name plus the opponent's pre-match rating from the active
+mode. The opponent's Wordle progress remains letterless color feedback.
+The top-right avatar once again uses Clerk's original user-button popover.
+Manage account opens a single modal with Profile and Personal Bests tabs.
+Profile is composed from Clerk's pinned experimental UI package so the profile
+photo/name, username, email, phone, connected-account, password, and deletion
+sections retain Clerk's original controls and reverification behavior. Password
+and deletion have been moved into Profile, so there is no separate Security
+tab. Username changes are synchronized from Clerk to the internal
+`User.displayName` used by opponents and match history. Personal Bests contains
+only its title, game/mode labels, and times; Wordle Speed Solo is always listed
+and displays a dash before a time exists. `DELETE /api/me` removes the
+corresponding application profile, cascading its ratings, personal bests, and
+match participation after the Clerk identity is deleted, while completed
+matches are retained with a cleared winner reference when necessary.
+
+Timed personal bests are durable rows in `PersonalBest`, uniquely keyed by
+`(userId, gameId, mode)`. Migration
+`20260828022000_add_personal_bests` creates the table. The update path uses a
+conditional database write, so a concurrent or slower result cannot replace a
+faster time. `/api/me` includes the user's personal bests for profile and lobby
+display.
+
+Wordle Speed Solo is an authenticated, one-player Colyseus room named
+`wordle_speed_solo`. It retains the same server-owned puzzle generation, move
+validation, three-second countdown, authoritative clock, and reconnect grace as
+ranked play. Only a solved run records a time. Solo never creates a ranked match
+or participant row and never changes Glicko-2 ratings. The current automated
+total is 43 tests: 15 realtime integration tests, 9 REST tests, and 19 package
+tests.
+
+### 17. Authenticated player profiles
+
+Opponent names now link to `/players/[userId]`, using the stable internal user
+id because display names are editable and not unique. The page shows the
+player's current ratings, timed personal bests, all-time completed ranked
+win/draw/loss counts, and up to 20 recent completed matches. Opponent names in
+that history continue linking through the same route.
+
+`GET /api/players/:userId` requires authentication and returns only application
+profile data. It never returns `authSubject`, email addresses, tokens, private
+Wordle guesses, or active matches. Missing player ids return 404. A link opened
+during a live match targets a new browser tab so inspecting the opponent does
+not navigate away from—and forfeit—the current room.
 
 ## Fixed Clerk test-account policy
 
@@ -453,8 +508,8 @@ blocks.
 | --- | --- | --- |
 | Wordle modes, rules, and privacy serialization | Passing | 13 package tests |
 | Glicko-2 calculation | Passing | 6 package tests, including the canonical worked example and opponent-strength ordering |
-| REST auth, identity mapping, history, CORS | Passing | 6 server tests |
-| Matchmaking/modes/countdown/clock/lifecycle/reconnect/finalization | Passing | 14 two-client server integration tests |
+| REST auth, identity mapping, profile editing/deletion, public player profiles, personal bests, history, CORS | Passing | 9 server tests |
+| Matchmaking/modes/countdown/clock/lifecycle/reconnect/finalization and Speed Solo | Passing | 15 server integration tests |
 | Live Clerk JWT + local REST/realtime + persistence | Passing | `smoke:live` run on August 27, 2026 |
 | Typecheck, ESLint, production builds | Passing with the live smoke and test-isolation changes included | Root commands below |
 | Next.js + Clerk rendered UI in two browser sessions | Partially verified | Same-room play, persistence, and no instant refresh-forfeit verified; resumed-board completion remains |
@@ -503,9 +558,11 @@ smoke uses the fixed Clerk identities above and retains them.
 ## Efficient continuation plan
 
 1. Keep all root gates green and keep the two-account live smoke rerunnable.
-2. Run one focused two-session pass through the new navigation and both modes:
-   home → Wordle → Speed (verify countdown and refresh recovery) → history, then
-   Fewest Guesses (verify the first solver waits and lower guess count wins).
+2. Run one focused two-session pass through the new navigation and modes: edit
+   each profile username, then home → Wordle → Speed (verify opponent name,
+   mode rating, linked public profile, countdown, and refresh recovery) → history, then Fewest
+   Guesses (verify the first solver waits and lower guess count wins). Finish a
+   Speed Solo run and confirm the same PB appears in the lobby and profile.
    Record the result here.
 3. Treat any failure in that browser check as Phase 1 work. Do not paper over it
    in the next game.

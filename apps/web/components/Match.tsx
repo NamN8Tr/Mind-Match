@@ -2,11 +2,13 @@
 
 import type { Room } from "@colyseus/sdk";
 import type { MatchOpponentInfo, MatchResult, PlayerId, WordleMove, WordleStateView } from "@smart-rot/shared-types";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
 import { OpponentWordleBoard } from "./OpponentWordleBoard";
 import { WordleBoard } from "./WordleBoard";
 import { WordleKeyboard } from "./WordleKeyboard";
+import { WordleNotice, type WordleNoticeMessage } from "./WordleNotice";
 
 interface MatchResultMessage {
   result: MatchResult;
@@ -45,14 +47,17 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
   const [opponent, setOpponent] = useState<MatchOpponentInfo | null>(null);
   const [phase, setPhase] = useState<"waiting" | "countdown" | "active">("waiting");
   const [outcome, setOutcome] = useState<MatchResultMessage | null>(null);
-  const [moveError, setMoveError] = useState<string | null>(null);
+  const [moveNotice, setMoveNotice] = useState<WordleNoticeMessage | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [submittingGuess, setSubmittingGuess] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
   const [countdownClock, setCountdownClock] = useState<SynchronizedCountdown | null>(null);
   const [matchClock, setMatchClock] = useState<SynchronizedClock | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [confirmingExit, setConfirmingExit] = useState(false);
   const selfGuessCountRef = useRef<number | null>(null);
+  const keepPlayingButtonRef = useRef<HTMLButtonElement | null>(null);
+  const moveNoticeIdRef = useRef(0);
 
   useEffect(() => {
     selfGuessCountRef.current = null;
@@ -77,14 +82,14 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       selfGuessCountRef.current = nextGuessCount;
       setView(payload);
       if (previousGuessCount === null || nextGuessCount > previousGuessCount) {
-        setMoveError(null);
+        setMoveNotice(null);
         setInputValue("");
         setSubmittingGuess(false);
       }
     });
     const offResult = room.onMessage("result", (payload: MatchResultMessage) => {
       setConnectionLost(false);
-      setMoveError(null);
+      setMoveNotice(null);
       setInputValue("");
       setSubmittingGuess(false);
       setOutcome(payload);
@@ -92,7 +97,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
     });
     const offRejected = room.onMessage("moveRejected", (payload: { message: string }) => {
       setSubmittingGuess(false);
-      setMoveError(payload.message);
+      setMoveNotice({ id: ++moveNoticeIdRef.current, message: payload.message });
     });
     const handleLeave = (code: number) => {
       // Codes below 4000 mean an abnormal drop rather than a deliberate close
@@ -134,6 +139,15 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
   }, [room]);
 
   useEffect(() => {
+    if (!moveNotice) return;
+    const noticeId = moveNotice.id;
+    const timeout = window.setTimeout(() => {
+      setMoveNotice((current) => (current?.id === noticeId ? null : current));
+    }, 2_200);
+    return () => window.clearTimeout(timeout);
+  }, [moveNotice]);
+
+  useEffect(() => {
     const shouldTick = (phase === "countdown" && countdownClock !== null) || (phase === "active" && matchClock !== null);
     if (!shouldTick || outcome !== null) return;
     const updateClock = () => setClockNow(Date.now());
@@ -146,6 +160,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
     view !== null &&
     phase === "active" &&
     outcome === null &&
+    !confirmingExit &&
     !connectionLost &&
     !view.self.solved &&
     view.self.guessesRemaining > 0 &&
@@ -158,24 +173,25 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       const key = rawKey.toUpperCase();
       if (key === "ENTER") {
         if (inputValue.length !== view.wordLength) {
-          setMoveError(`Guess must be ${view.wordLength} letters`);
+          setMoveNotice({
+            id: ++moveNoticeIdRef.current,
+            message: `Guess must be ${view.wordLength} letters`,
+          });
           return;
         }
         const move: WordleMove = { type: "guess", word: inputValue.toLowerCase() };
-        setMoveError(null);
+        setMoveNotice(null);
         setSubmittingGuess(true);
         room.send("move", move);
         return;
       }
 
       if (key === "BACKSPACE" || key === "DELETE") {
-        setMoveError(null);
         setInputValue((current) => current.slice(0, -1));
         return;
       }
 
       if (/^[A-Z]$/.test(key)) {
-        setMoveError(null);
         setInputValue((current) => (current.length < view.wordLength ? `${current}${key.toLowerCase()}` : current));
       }
     },
@@ -194,6 +210,28 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [canPlay, handleKey, submittingGuess]);
+
+  useEffect(() => {
+    if (!confirmingExit) return;
+    keepPlayingButtonRef.current?.focus();
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setConfirmingExit(false);
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [confirmingExit]);
+
+  // A concluded match has nothing left to forfeit, so the back button leaves
+  // straight away rather than warning about a match that is already over.
+  function requestExit(): void {
+    if (outcome) {
+      onExit();
+      return;
+    }
+    setConfirmingExit(true);
+  }
 
   if (!view) {
     return (
@@ -255,6 +293,9 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       )}
 
       <div className="match-toolbar">
+        <button className="match-back-button" onClick={requestExit}>
+          <span aria-hidden="true">←</span> Back
+        </button>
         <span className={`match-mode-badge match-mode-${view.mode}`}>
           {view.mode === "speed" ? "Speed" : "Fewest guesses"}
         </span>
@@ -268,10 +309,20 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       {opponent && (
         <div className="opponent-identity" aria-label={`Playing against ${opponent.displayName}, rating ${Math.round(opponent.rating)}`}>
           <span>vs</span>
-          <strong>{opponent.displayName}</strong>
+          <Link
+            className="player-profile-link"
+            href={`/players/${encodeURIComponent(opponent.userId)}`}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open ${opponent.displayName}'s profile in a new tab`}
+          >
+            <strong>{opponent.displayName}</strong>
+          </Link>
           <span className="opponent-rating">{Math.round(opponent.rating)}</span>
         </div>
       )}
+
+      <WordleNotice notice={moveNotice} />
 
       <div className="match-boards">
         <WordleBoard
@@ -301,10 +352,32 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
 
       {!gameOver && <WordleKeyboard guesses={view.self.guesses} disabled={!canPlay || submittingGuess} onKey={handleKey} />}
 
-      {moveError && (
-        <p className="error-text" role="alert" style={{ textAlign: "center", marginTop: 10 }}>
-          {moveError}
-        </p>
+      {confirmingExit && !gameOver && (
+        <div className="confirm-backdrop" role="presentation" onClick={() => setConfirmingExit(false)}>
+          <div
+            className="confirm-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="forfeit-match-title"
+            aria-describedby="forfeit-match-body"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="forfeit-match-title">Forfeit the match?</h2>
+            <p id="forfeit-match-body" className="muted">
+              {phase === "active"
+                ? "Leaving now forfeits the match. Your opponent wins it and your rating drops."
+                : "Leaving now forfeits the match. It is abandoned before the first move, so no rating changes."}
+            </p>
+            <div className="confirm-actions">
+              <button className="btn-secondary" ref={keepPlayingButtonRef} onClick={() => setConfirmingExit(false)}>
+                Keep playing
+              </button>
+              <button className="btn-danger" onClick={onExit}>
+                Forfeit match
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {gameOver && (
