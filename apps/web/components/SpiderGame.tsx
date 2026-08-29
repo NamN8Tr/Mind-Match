@@ -12,6 +12,7 @@ import type {
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
+import { GameHelpDialog } from "./GameHelpDialog";
 import { SpiderBoard } from "./SpiderBoard";
 import { WordleNotice, type WordleNoticeMessage } from "./WordleNotice";
 
@@ -69,6 +70,7 @@ export function SpiderGame({
   const [pendingMove, setPendingMove] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
   const [confirmingExit, setConfirmingExit] = useState(false);
+  const [showingHelp, setShowingHelp] = useState(false);
   const moveCountRef = useRef<number | null>(null);
   const noticeIdRef = useRef(0);
   const keepPlayingRef = useRef<HTMLButtonElement | null>(null);
@@ -183,11 +185,6 @@ export function SpiderGame({
     room.send("move", move);
   }
 
-  function resetBoard(): void {
-    if (!view || view.self.moveCount === 0 || pendingMove || gameOver) return;
-    if (window.confirm("Reset this board to the original deal? Your timer keeps running.")) submitMove({ type: "reset" });
-  }
-
   function requestExit(): void {
     if (gameOver) onExit();
     else setConfirmingExit(true);
@@ -198,7 +195,7 @@ export function SpiderGame({
   const countdownRemaining = countdownClock ? Math.max(0, countdownClock.endsAt - (clockNow + countdownClock.offsetMs)) : null;
   const countdownNumber = countdownRemaining === null ? 3 : Math.max(1, Math.ceil(countdownRemaining / 1000));
   const elapsed = soloResult?.elapsedMs ?? (runClock ? Math.max(0, clockNow + runClock.offsetMs - runClock.startedAt) : 0);
-  const canPlay = phase === "active" && !gameOver && !connectionLost && !confirmingExit && !view.self.solved;
+  const canPlay = phase === "active" && !gameOver && !connectionLost && !confirmingExit && !showingHelp && !view.self.solved;
   const rankedMatchResult = rankedResult?.result;
   const won = rankedMatchResult?.status === "win" && rankedMatchResult.winnerId === currentUserId;
   const lost = rankedMatchResult?.status === "win" && rankedMatchResult.winnerId !== currentUserId;
@@ -220,8 +217,11 @@ export function SpiderGame({
 
       <div className="match-toolbar spider-toolbar">
         <button className="match-back-button" onClick={requestExit}><span aria-hidden="true">←</span> Back</button>
-        <span className="match-mode-badge match-mode-speed">{kind === "solo" ? "Solo" : "Speed"}</span>
-        <span className="match-timer"><span aria-hidden="true">◷</span> {formatTime(elapsed)}</span>
+        <span className="match-mode-badge match-mode-speed">{view.mode.replace("-", " ")} · {kind === "solo" ? "Solo" : "Ranked"}</span>
+        <div className="match-toolbar-actions">
+          <button type="button" className="match-help-button" onClick={() => setShowingHelp(true)}><span aria-hidden="true">?</span> Help</button>
+          <span className="match-timer"><span aria-hidden="true">◷</span> {formatTime(elapsed)}</span>
+        </div>
       </div>
 
       {kind === "ranked" && opponent && (
@@ -234,18 +234,51 @@ export function SpiderGame({
       {opponentLeft && !gameOver && <p className="spider-departure-note">Your opponent left. You can still finish; if you leave too, the race is a draw.</p>}
 
       <div className="spider-progress" aria-label="Race progress">
-        <div><span>You</span><strong>{view.self.completedRuns}/{view.targetRuns}</strong><small>{view.self.moveCount} moves</small></div>
-        {kind === "ranked" && <div><span>{opponent?.displayName ?? "Opponent"}</span><strong>{view.opponent.completedRuns}/{view.targetRuns}</strong><small>{view.opponent.moveCount} moves</small></div>}
+        <div><span>You</span><strong>{view.self.completedRuns}/{view.targetRuns}</strong><small>{view.self.moveCount} actions · {view.self.stock.length} deals left</small></div>
+        {kind === "ranked" && <div><span>{opponent?.displayName ?? "Opponent"}</span><strong>{view.opponent.completedRuns}/{view.targetRuns}</strong><small>{view.opponent.moveCount} actions · {view.opponent.remainingDeals} deals left</small></div>}
       </div>
 
       <WordleNotice notice={notice} />
-      <SpiderBoard player={view.self} disabled={!canPlay} pending={pendingMove} onMove={submitMove} onLocalError={showLocalError} />
+      <SpiderBoard player={view.self} disabled={!canPlay} pending={pendingMove} showActions={!gameOver} onMove={submitMove} onLocalError={showLocalError} />
 
-      {!gameOver && (
-        <div className="spider-controls">
-          <p><strong>Goal:</strong> Build descending stacks. A complete K→A run clears automatically.</p>
-          <button className="btn-secondary" onClick={resetBoard} disabled={!canPlay || pendingMove || view.self.moveCount === 0}>Reset deal</button>
-        </div>
+      {showingHelp && !gameOver && (
+        <GameHelpDialog
+          eyebrow={`${view.mode.replace("-", " ")} · ${kind === "solo" ? "Solo" : "Ranked"}`}
+          title="How to play Spider"
+          onClose={() => setShowingHelp(false)}
+        >
+          <section>
+            <h3>Goal</h3>
+            <p>Clear all eight complete, same-suit runs from King down to Ace. A finished run leaves the tableau automatically.</p>
+          </section>
+          <section>
+            <h3>Move cards</h3>
+            <ul>
+              <li>Tap a face-up card to make its best valid move: same suit first, then another suit, then an empty column, searching left to right.</li>
+              <li>Drag a card when you want to choose the destination yourself. A descending same-suit stack moves together.</li>
+              <li>You may place a card or stack on the next higher rank. Any card or valid stack may fill an empty column.</li>
+            </ul>
+          </section>
+          <section>
+            <h3>Stock, hints, and take backs</h3>
+            <ul>
+              <li>Click the stock pile above the tableau to deal one new card to every column, including empty columns.</li>
+              <li>Hints cycle through moves that reveal cards or build same-suit runs, then suggest an empty column or another deal.</li>
+              <li>Hints and take backs are unlimited.</li>
+            </ul>
+          </section>
+          <section>
+            <h3>This mode</h3>
+            <p>
+              {view.mode === "1-suit"
+                ? "All cards use one suit, so every descending stack can move together."
+                : `${view.mode.replace("-", " ")} mixes suits. Cards of different suits can be placed together, but only a same-suit descending stack moves as one.`}
+              {kind === "solo"
+                ? " Finish as quickly as possible to set a personal best."
+                : " Both players receive the same solvable board; the fastest clear wins. Leaving alone is not an automatic loss, and if both players leave the race is a draw."}
+            </p>
+          </section>
+        </GameHelpDialog>
       )}
 
       {confirmingExit && !gameOver && (

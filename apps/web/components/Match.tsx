@@ -5,6 +5,7 @@ import type { MatchOpponentInfo, MatchResult, PlayerId, WordleMove, WordleStateV
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
+import { GameHelpDialog } from "./GameHelpDialog";
 import { OpponentWordleBoard } from "./OpponentWordleBoard";
 import { WordleBoard } from "./WordleBoard";
 import { WordleKeyboard } from "./WordleKeyboard";
@@ -55,6 +56,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
   const [matchClock, setMatchClock] = useState<SynchronizedClock | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
   const [confirmingExit, setConfirmingExit] = useState(false);
+  const [showingHelp, setShowingHelp] = useState(false);
   const selfGuessCountRef = useRef<number | null>(null);
   const keepPlayingButtonRef = useRef<HTMLButtonElement | null>(null);
   const moveNoticeIdRef = useRef(0);
@@ -161,6 +163,7 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
     phase === "active" &&
     outcome === null &&
     !confirmingExit &&
+    !showingHelp &&
     !connectionLost &&
     !view.self.solved &&
     view.self.guessesRemaining > 0 &&
@@ -299,11 +302,14 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
         <span className={`match-mode-badge match-mode-${view.mode}`}>
           {view.mode === "speed" ? "Speed" : "Fewest guesses"}
         </span>
-        {view.mode === "speed" && !gameOver && (
-          <span className={`match-timer${remainingMs !== null && remainingMs <= 30_000 ? " urgent" : ""}`}>
-            <span aria-hidden="true">◷</span> {formattedTime}
-          </span>
-        )}
+        <div className="match-toolbar-actions">
+          <button type="button" className="match-help-button" onClick={() => setShowingHelp(true)}><span aria-hidden="true">?</span> Help</button>
+          {view.mode === "speed" && !gameOver && (
+            <span className={`match-timer${remainingMs !== null && remainingMs <= 30_000 ? " urgent" : ""}`}>
+              <span aria-hidden="true">◷</span> {formattedTime}
+            </span>
+          )}
+        </div>
       </div>
 
       {opponent && (
@@ -351,6 +357,36 @@ export function Match({ room, currentUserId, onExit }: MatchProps) {
       )}
 
       {!gameOver && <WordleKeyboard guesses={view.self.guesses} disabled={!canPlay || submittingGuess} onKey={handleKey} />}
+
+      {showingHelp && !gameOver && (
+        <GameHelpDialog
+          eyebrow={`Wordle · ${view.mode === "speed" ? "Speed" : "Fewest guesses"}`}
+          title="How to play Wordle"
+          onClose={() => setShowingHelp(false)}
+        >
+          <section>
+            <h3>Goal</h3>
+            <p>Find the hidden five-letter word in six valid guesses. Both players receive the same answer.</p>
+          </section>
+          <section>
+            <h3>Read the tiles</h3>
+            <ul>
+              <li>Green means the letter is correct and in the correct position.</li>
+              <li>Yellow means the letter is in the word but belongs in another position.</li>
+              <li>Gray means the letter is not used in the answer.</li>
+            </ul>
+          </section>
+          <section>
+            <h3>This mode</h3>
+            <p>
+              {view.mode === "speed"
+                ? "Solve before your opponent. The first correct answer wins the ranked match."
+                : "Solve using fewer guesses than your opponent before the round ends. Matching guess counts result in a draw."}
+              {" "}Leaving a ranked Wordle match forfeits it.
+            </p>
+          </section>
+        </GameHelpDialog>
+      )}
 
       {confirmingExit && !gameOver && (
         <div className="confirm-backdrop" role="presentation" onClick={() => setConfirmingExit(false)}>

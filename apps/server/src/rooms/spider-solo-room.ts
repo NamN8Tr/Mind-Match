@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { Room, type Client, type Delayed } from "@colyseus/core";
-import { spiderSpeedEngine } from "@smart-rot/game-engines";
-import { GameRuleViolation, type MatchResult, type SoloResultMessage, type SpiderMove, type SpiderState } from "@smart-rot/shared-types";
+import {
+  GameRuleViolation,
+  type GameEngine,
+  type MatchResult,
+  type SoloResultMessage,
+  type SpiderMove,
+  type SpiderState,
+} from "@smart-rot/shared-types";
 import { resolveAuthenticatedUser } from "../auth/clerk.js";
 import { recordTimedPersonalBest } from "../personal-best/service.js";
 
@@ -25,7 +31,10 @@ interface SoloJoinOptions {
   authToken?: string;
 }
 
-export function createSpiderSoloRoom(options: SpiderSoloRoomOptions = {}) {
+export function createSpiderSoloRoom(
+  engine: GameEngine<SpiderState, SpiderMove>,
+  options: SpiderSoloRoomOptions = {},
+) {
   const countdownMs = options.countdownMs ?? COUNTDOWN_MS;
   const runTimeoutMs = options.runTimeoutMs ?? RUN_TIMEOUT_MS;
   const seedFactory = options.seedFactory ?? randomUUID;
@@ -58,7 +67,7 @@ export function createSpiderSoloRoom(options: SpiderSoloRoomOptions = {}) {
     onJoin(_client: Client, _options: unknown, auth: SoloAuth): void {
       this.autoDispose = false;
       this.userId = auth.userId;
-      this.gameState = spiderSpeedEngine.generateInitialState(seedFactory(), [auth.userId]);
+      this.gameState = engine.generateInitialState(seedFactory(), [auth.userId]);
     }
 
     onDrop(client: Client): void {
@@ -117,15 +126,15 @@ export function createSpiderSoloRoom(options: SpiderSoloRoomOptions = {}) {
         return;
       }
       try {
-        spiderSpeedEngine.validateMove(this.gameState, move, this.userId);
+        engine.validateMove(this.gameState, move, this.userId);
       } catch (error) {
         client.send("moveRejected", { message: error instanceof GameRuleViolation ? error.message : "Invalid move" });
         return;
       }
 
       this.processingMove = true;
-      this.gameState = spiderSpeedEngine.applyMove(this.gameState, move, this.userId).state;
-      if (spiderSpeedEngine.isTerminal(this.gameState)) {
+      this.gameState = engine.applyMove(this.gameState, move, this.userId).state;
+      if (engine.isTerminal(this.gameState)) {
         await this.conclude(this.gameState.players[this.userId]?.solved === true);
       } else {
         this.sendState(client);
@@ -145,7 +154,7 @@ export function createSpiderSoloRoom(options: SpiderSoloRoomOptions = {}) {
       let persisted = true;
       if (elapsedMs !== null) {
         try {
-          const recorded = await recordTimedPersonalBest(this.userId, "spider", "speed", elapsedMs);
+          const recorded = await recordTimedPersonalBest(this.userId, "spider", this.gameState.mode, elapsedMs);
           bestTimeMs = recorded.personalBest.bestTimeMs;
           isPersonalBest = recorded.improved;
         } catch (error) {
@@ -164,7 +173,7 @@ export function createSpiderSoloRoom(options: SpiderSoloRoomOptions = {}) {
 
     private sendState(client: Client, result?: MatchResult): void {
       if (this.userId && this.gameState) {
-        client.send("state", spiderSpeedEngine.serializeStateForPlayer(this.gameState, this.userId, result));
+        client.send("state", engine.serializeStateForPlayer(this.gameState, this.userId, result));
       }
     }
 

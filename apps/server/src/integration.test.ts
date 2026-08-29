@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { Client, type Room, type SeatReservation } from "@colyseus/sdk";
-import { VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
+import { generateSolvableSpiderDeal, VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
 import type {
   MatchOpponentInfo,
   MatchResult,
   PlayerId,
   SoloResultMessage,
+  SpiderStateView,
   WordleMode,
   WordleStateView,
 } from "@smart-rot/shared-types";
@@ -49,6 +50,7 @@ const TEST_MATCH_TIMEOUT_MS = 750;
 const SOLO_TEST_SEED = "integration-solo-seed";
 const SPEED_QUEUE = "wordle_speed_matchmaking";
 const FEWEST_GUESSES_QUEUE = "wordle_fewest_matchmaking";
+const SPIDER_QUEUE = "spider_4_suit_matchmaking";
 
 interface ClockMessage {
   startedAt: number;
@@ -183,6 +185,45 @@ async function startMatch(
     opponentForA,
     opponentForB,
   };
+}
+
+async function startSpiderMatch(port: number) {
+  const subjectA = `${USER_PREFIX}${randomUUID()}`;
+  const subjectB = `${USER_PREFIX}${randomUUID()}`;
+  const clientA = new Client(`ws://localhost:${port}`);
+  const clientB = new Client(`ws://localhost:${port}`);
+  const queueA = await clientA.joinOrCreate(SPIDER_QUEUE, { authToken: subjectA });
+  const queueB = await clientB.joinOrCreate(SPIDER_QUEUE, { authToken: subjectB });
+  const [reservationA, reservationB] = await Promise.all([
+    nextMessage<SeatReservation>(queueA, "seat"),
+    nextMessage<SeatReservation>(queueB, "seat"),
+  ]);
+  const [roomA, roomB] = await Promise.all([
+    clientA.consumeSeatReservation(reservationA),
+    clientB.consumeSeatReservation(reservationB),
+  ]);
+  queueA.send("confirm");
+  queueB.send("confirm");
+
+  const stateA = nextMessage<SpiderStateView>(roomA, "state");
+  const stateB = nextMessage<SpiderStateView>(roomB, "state");
+  const activeA = waitForPhase(roomA, "active");
+  const activeB = waitForPhase(roomB, "active");
+  ready(roomA);
+  ready(roomB);
+  const [viewA, viewB] = await Promise.all([stateA, stateB]);
+  await Promise.all([activeA, activeB]);
+
+  const [userA, userB] = await Promise.all([
+    prisma.user.findUniqueOrThrow({ where: { authSubject: subjectA } }),
+    prisma.user.findUniqueOrThrow({ where: { authSubject: subjectB } }),
+  ]);
+  const match = await prisma.match.findFirstOrThrow({
+    where: { gameId: "spider", participants: { some: { userId: userA.id } }, status: "ACTIVE" },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return { roomA, roomB, userAId: userA.id, userBId: userB.id, matchId: match.id, seed: match.seed, viewA, viewB };
 }
 
 const port = 18000 + Math.floor(Math.random() * 2000);
@@ -484,6 +525,57 @@ test("a player leaving mid-match forfeits to the opponent", async () => {
   assert.equal(persisted.winnerId, userBId);
 
   roomB.leave();
+});
+
+test("Spider gives both players the same solvable board and a single departure is not a forfeit", async () => {
+  const { roomA, roomB, userBId, matchId, seed, viewA, viewB } = await startSpiderMatch(port);
+  assert.deepEqual(viewA.self.columns, viewB.self.columns, "both Spider players must receive the identical seeded deal");
+
+  let prematureResult: ResultMessage | null = null;
+  const result = nextMessage<ResultMessage>(roomB, "result");
+  const observeResult = roomB.onMessage("result", (payload: ResultMessage) => {
+    prematureResult = payload;
+  });
+  roomA.leave();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(prematureResult, null, "leaving Spider must not immediately award the opponent a win");
+
+  for (const move of generateSolvableSpiderDeal(seed, "4-suit").solution) roomB.send("move", move);
+  const outcome = await result;
+  observeResult();
+  assert.equal(outcome.result.status, "win");
+  assert.equal(outcome.result.winnerId, userBId);
+  assert.equal(outcome.result.reason, "solved");
+
+  const persisted = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  assert.equal(persisted.winnerId, userBId);
+  const persistedSpiderState = persisted.finalState as { players?: Record<string, Record<string, unknown>> } | null;
+  assert.equal(
+    "undoStack" in (persistedSpiderState?.players?.[userBId] ?? {}),
+    false,
+    "ranked history must not persist the potentially large runtime undo stack",
+  );
+  const rankedPersonalBest = await prisma.personalBest.findUniqueOrThrow({
+    where: { userId_gameId_mode: { userId: userBId, gameId: "spider", mode: "4-suit" } },
+  });
+  assert.ok(rankedPersonalBest.bestTimeMs > 0, "a ranked Spider clear should count toward that suit mode's personal best");
+  roomB.leave();
+});
+
+test("Spider records a draw when both players leave", async () => {
+  const { roomA, roomB, matchId } = await startSpiderMatch(port);
+  roomA.leave();
+  roomB.leave();
+
+  let persisted = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  for (let attempt = 0; attempt < 20 && persisted.status === "ACTIVE"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    persisted = await prisma.match.findUniqueOrThrow({ where: { id: matchId } });
+  }
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.resultStatus, "draw");
+  assert.equal(persisted.resultReason, "both-left");
+  assert.equal(persisted.winnerId, null);
 });
 
 test("the same user cannot hold two queue entries for one game at once", async () => {

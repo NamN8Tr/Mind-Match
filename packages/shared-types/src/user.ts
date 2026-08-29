@@ -14,6 +14,12 @@ export interface TimedPersonalBest {
   achievedAt: string;
 }
 
+export interface RankedModeWinCount {
+  gameId: string;
+  mode: string;
+  wins: number;
+}
+
 export interface MatchOpponentInfo {
   userId: string;
   displayName: string;

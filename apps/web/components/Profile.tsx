@@ -5,6 +5,15 @@ import Link from "next/link";
 import { type FormEvent, useEffect, useState } from "react";
 import { getMe, type MeResponse, updateUsername } from "../lib/api";
 
+const ACHIEVEMENT_MODES = [
+  { gameId: "wordle", mode: "speed", gameLabel: "Wordle", modeLabel: "Speed", timed: true },
+  { gameId: "wordle", mode: "fewest-guesses", gameLabel: "Wordle", modeLabel: "Fewest Guesses", timed: false },
+  { gameId: "spider", mode: "1-suit", gameLabel: "Spider", modeLabel: "1 Suit", timed: true },
+  { gameId: "spider", mode: "2-suit", gameLabel: "Spider", modeLabel: "2 Suits", timed: true },
+  { gameId: "spider", mode: "3-suit", gameLabel: "Spider", modeLabel: "3 Suits", timed: true },
+  { gameId: "spider", mode: "4-suit", gameLabel: "Spider", modeLabel: "4 Suits", timed: true },
+] as const;
+
 function formatTime(milliseconds: number): string {
   const totalTenths = Math.floor(milliseconds / 100);
   const minutes = Math.floor(totalTenths / 600);
@@ -55,8 +64,6 @@ export function Profile() {
     }
   }
 
-  const speedBest = profile?.personalBests.find((best) => best.gameId === "wordle" && best.mode === "speed");
-
   return (
     <div className="stack profile-stack">
       <Link className="back-link" href="/">
@@ -93,23 +100,47 @@ export function Profile() {
         {error && <p className="error-text">{error}</p>}
       </section>
 
-      <section className="card profile-section" id="personal-bests">
+      <section className="card profile-section" id="achievements">
         <div className="profile-section-heading">
           <div>
-            <h2>Personal bests</h2>
-            <p className="muted">Fastest completed solo runs in timed modes.</p>
+            <h2>Achievements</h2>
+            <p className="muted">Ranked wins and fastest completed games.</p>
           </div>
-          <Link className="btn-secondary" href="/games/wordle">
-            Play Wordle
+          <Link className="btn-secondary" href="/">
+            Choose a game
           </Link>
         </div>
-        <div className="personal-best-row">
-          <div>
-            <strong>Wordle Speed Solo</strong>
-            <span className="muted">Server timed</span>
-          </div>
-          <span className="personal-best-time">{speedBest ? formatTime(speedBest.bestTimeMs) : "No time yet"}</span>
-        </div>
+        {ACHIEVEMENT_MODES.map((achievement) => {
+          const best = profile?.personalBests.find(
+            (entry) =>
+              entry.gameId === achievement.gameId &&
+              (entry.mode === achievement.mode ||
+                (achievement.gameId === "spider" && achievement.mode === "1-suit" && entry.mode === "speed")),
+          );
+          const wins = profile?.rankedWins.find(
+            (entry) => entry.gameId === achievement.gameId && entry.mode === achievement.mode,
+          )?.wins ?? 0;
+          return (
+            <div className="personal-best-row" key={`${achievement.gameId}-${achievement.mode}`}>
+              <div>
+                <strong>{achievement.gameLabel} {achievement.modeLabel}</strong>
+                <span className="muted">{achievement.timed ? "Solo or ranked best" : "Ranked mode"}</span>
+              </div>
+              <div className="achievement-stats">
+                <span className="achievement-stat">
+                  <small>Wins</small>
+                  <strong>{wins}</strong>
+                </span>
+                {achievement.timed && (
+                  <span className="achievement-stat">
+                    <small>Best</small>
+                    <strong>{best ? formatTime(best.bestTimeMs) : "—"}</strong>
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </section>
     </div>
   );

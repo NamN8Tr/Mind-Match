@@ -39,7 +39,7 @@ export default function HomePage() {
                 <h3>Spider Sprint</h3>
                 <span className="availability-pill">Play now</span>
               </div>
-              <p>Race on identical, guaranteed-solvable one-suit Spider boards or chase a solo best.</p>
+              <p>Play guaranteed-solvable 1-, 2-, 3-, or 4-suit Spider in ranked races or solo.</p>
             </div>
             <span className="game-card-arrow" aria-hidden="true">→</span>
           </Link>

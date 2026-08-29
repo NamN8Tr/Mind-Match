@@ -2,7 +2,14 @@ import { LocalDriver, LocalPresence, Server } from "@colyseus/core";
 import { RedisDriver } from "@colyseus/redis-driver";
 import { RedisPresence } from "@colyseus/redis-presence";
 import { WebSocketTransport } from "@colyseus/ws-transport";
-import { spiderSpeedEngine, wordleFewestGuessesEngine, wordleSpeedEngine } from "@smart-rot/game-engines";
+import {
+  spiderFourSuitEngine,
+  spiderOneSuitEngine,
+  spiderThreeSuitEngine,
+  spiderTwoSuitEngine,
+  wordleFewestGuessesEngine,
+  wordleSpeedEngine,
+} from "@smart-rot/game-engines";
 import { env } from "./env.js";
 import { createMatchmakingRoom } from "./matchmaking/matchmaking-room.js";
 import { createGameRoom, type GameRoomOptions } from "./rooms/create-game-room.js";
@@ -44,16 +51,26 @@ export function createColyseusServer(options: ColyseusServerOptions = {}): Serve
   gameServer.define("wordle_fewest", createGameRoom(wordleFewestGuessesEngine, options.gameRoom));
   gameServer.define("wordle_fewest_matchmaking", createMatchmakingRoom("wordle", "fewest-guesses", "wordle_fewest"));
   gameServer.define("wordle_speed_solo", createWordleSoloRoom(options.soloRoom));
-  gameServer.define(
-    "spider_speed",
-    createGameRoom(spiderSpeedEngine, {
-      ...options.gameRoom,
-      matchTimeoutMs: options.gameRoom?.matchTimeoutMs ?? 15 * 60_000,
-      departurePolicy: "continue-until-both-leave",
-    }),
-  );
-  gameServer.define("spider_speed_matchmaking", createMatchmakingRoom("spider", "speed", "spider_speed"));
-  gameServer.define("spider_speed_solo", createSpiderSoloRoom(options.soloRoom));
+  const spiderVariants = [
+    { key: "1_suit", mode: "1-suit", engine: spiderOneSuitEngine },
+    { key: "2_suit", mode: "2-suit", engine: spiderTwoSuitEngine },
+    { key: "3_suit", mode: "3-suit", engine: spiderThreeSuitEngine },
+    { key: "4_suit", mode: "4-suit", engine: spiderFourSuitEngine },
+  ] as const;
+  for (const variant of spiderVariants) {
+    const matchRoomName = `spider_${variant.key}`;
+    gameServer.define(
+      matchRoomName,
+      createGameRoom(variant.engine, {
+        ...options.gameRoom,
+        matchTimeoutMs: options.gameRoom?.matchTimeoutMs ?? 15 * 60_000,
+        departurePolicy: "continue-until-both-leave",
+        timedPersonalBestMode: variant.mode,
+      }),
+    );
+    gameServer.define(`${matchRoomName}_matchmaking`, createMatchmakingRoom("spider", variant.mode, matchRoomName));
+    gameServer.define(`${matchRoomName}_solo`, createSpiderSoloRoom(variant.engine, options.soloRoom));
+  }
 
   return gameServer;
 }

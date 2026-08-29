@@ -7,7 +7,10 @@ import { getOrCreateRating } from "../rating/service.js";
 const SUPPORTED_RATING_POOLS = [
   { gameId: "wordle", mode: "speed" },
   { gameId: "wordle", mode: "fewest-guesses" },
-  { gameId: "spider", mode: "speed" },
+  { gameId: "spider", mode: "1-suit" },
+  { gameId: "spider", mode: "2-suit" },
+  { gameId: "spider", mode: "3-suit" },
+  { gameId: "spider", mode: "4-suit" },
 ] as const;
 
 const matchHistoryInclude = {
@@ -60,15 +63,28 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/me", { preHandler: requireAuth }, async (request) => {
     const user = request.currentUser!;
-    const [ratings, personalBests] = await Promise.all([
+    const [ratings, personalBests, rankedWinCounts] = await Promise.all([
       Promise.all(SUPPORTED_RATING_POOLS.map(({ gameId, mode }) => getOrCreateRating(user.id, gameId, mode))),
       getPersonalBests(user.id),
+      prisma.match.groupBy({
+        by: ["gameId", "mode"],
+        where: { status: "COMPLETED", resultStatus: "win", winnerId: user.id },
+        _count: { _all: true },
+      }),
     ]);
+    const rankedWinsByMode = new Map(
+      rankedWinCounts.map((entry) => [`${entry.gameId}:${entry.mode}`, entry._count._all]),
+    );
     return {
       id: user.id,
       displayName: user.displayName,
       ratings,
       personalBests,
+      rankedWins: SUPPORTED_RATING_POOLS.map(({ gameId, mode }) => ({
+        gameId,
+        mode,
+        wins: rankedWinsByMode.get(`${gameId}:${mode}`) ?? 0,
+      })),
     };
   });
 

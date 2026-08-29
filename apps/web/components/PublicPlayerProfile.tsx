@@ -19,6 +19,7 @@ function formatTime(milliseconds: number): string {
 function formatMode(mode: string): string {
   if (mode === "fewest-guesses") return "Fewest Guesses";
   if (mode === "speed") return "Speed";
+  if (/^[1-4]-suit$/.test(mode)) return `${mode[0]} ${mode[0] === "1" ? "Suit" : "Suits"}`;
   return mode;
 }
 
@@ -49,8 +50,8 @@ export function PublicPlayerProfile({ userId }: PublicPlayerProfileProps) {
   if (error) {
     return (
       <div className="stack profile-stack">
-        <Link className="back-link" href="/games/wordle">
-          ← Wordle
+        <Link className="back-link" href="/">
+          ← All games
         </Link>
         <div className="card">
           <h1 className="public-profile-error-title">Player unavailable</h1>
@@ -71,11 +72,12 @@ export function PublicPlayerProfile({ userId }: PublicPlayerProfileProps) {
   }
 
   const wordleRatings = profile.ratings.filter((rating) => rating.gameId === "wordle");
+  const spiderRatings = profile.ratings.filter((rating) => rating.gameId === "spider");
 
   return (
     <div className="stack profile-stack">
-      <Link className="back-link" href="/games/wordle">
-        ← Wordle
+      <Link className="back-link" href="/">
+        ← All games
       </Link>
 
       <section className="profile-header">
@@ -109,6 +111,16 @@ export function PublicPlayerProfile({ userId }: PublicPlayerProfileProps) {
       </section>
 
       <section className="card profile-section">
+        <h2>Spider rating</h2>
+        <div className="public-rating-grid">
+          {["1-suit", "2-suit", "3-suit", "4-suit"].map((mode) => {
+            const rating = spiderRatings.find((entry) => entry.mode === mode || (mode === "1-suit" && entry.mode === "speed"));
+            return <div className="public-rating-card" key={mode}><span>{formatMode(mode)}</span><strong>{rating ? Math.round(rating.rating) : "Unrated"}</strong></div>;
+          })}
+        </div>
+      </section>
+
+      <section className="card profile-section">
         <h2>Wordle ratings</h2>
         <div className="public-rating-grid">
           {["speed", "fewest-guesses"].map((mode) => {
@@ -130,9 +142,9 @@ export function PublicPlayerProfile({ userId }: PublicPlayerProfileProps) {
           <div className="personal-best-row" key={`${best.gameId}-${best.mode}`}>
             <div>
               <strong>
-                {formatGame(best.gameId)} {formatMode(best.mode)} Solo
+                {formatGame(best.gameId)} {formatMode(best.mode)}
               </strong>
-              <span className="muted">Server timed</span>
+              <span className="muted">{best.gameId === "spider" ? "Solo or ranked · Server timed" : "Solo · Server timed"}</span>
             </div>
             <span className="personal-best-time">{formatTime(best.bestTimeMs)}</span>
           </div>

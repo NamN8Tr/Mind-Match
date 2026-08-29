@@ -1,4 +1,4 @@
-import type { Glicko2Rating, TimedPersonalBest } from "@smart-rot/shared-types";
+import type { Glicko2Rating, RankedModeWinCount, TimedPersonalBest } from "@smart-rot/shared-types";
 
 const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:4000";
 
@@ -7,6 +7,7 @@ export interface MeResponse {
   displayName: string;
   ratings: Glicko2Rating[];
   personalBests: TimedPersonalBest[];
+  rankedWins: RankedModeWinCount[];
 }
 
 export interface MatchHistoryPlayer {

@@ -8,7 +8,7 @@ export default function ProfilePage() {
       fallback={
         <div className="card">
           <h2 style={{ marginTop: 0 }}>Profile</h2>
-          <p className="muted">Sign in to edit your username and view personal bests.</p>
+          <p className="muted">Sign in to edit your username and view achievements.</p>
         </div>
       }
     >

@@ -10,6 +10,7 @@ import {
 import { resolveAuthenticatedUser } from "../auth/clerk.js";
 import { prisma } from "../db/prisma.js";
 import { finalizeMatch, type FinalizeMatchOutcome } from "../matchmaking/match-service.js";
+import { recordTimedPersonalBest } from "../personal-best/service.js";
 
 interface GameRoomCreateOptions {
   matchId: string;
@@ -48,6 +49,8 @@ export interface GameRoomOptions {
    * board alive for the remaining player and only draws when both have left.
    */
   departurePolicy?: "forfeit" | "continue-until-both-leave";
+  /** Records a server-timed solve from this ranked room in the matching solo PB pool. */
+  timedPersonalBestMode?: string;
 }
 
 /**
@@ -67,6 +70,7 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
   const countdownMs = roomOptions.countdownMs ?? COUNTDOWN_MS;
   const matchTimeoutMs = roomOptions.matchTimeoutMs ?? 30 * 60_000;
   const departurePolicy = roomOptions.departurePolicy ?? "forfeit";
+  const timedPersonalBestMode = roomOptions.timedPersonalBestMode;
 
   return class GameRoom extends Room {
     maxClients = 2;
@@ -300,18 +304,41 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
     private async concludeMatch(result: MatchResult): Promise<void> {
       if (this.finished) return;
       this.finished = true;
+      const solvedElapsedMs =
+        timedPersonalBestMode &&
+        result.status === "win" &&
+        result.reason === "solved" &&
+        result.winnerId &&
+        this.matchStartedAt !== undefined
+          ? Math.max(1, Date.now() - this.matchStartedAt)
+          : null;
       this.joinDeadlineTimer?.clear();
       this.countdownTimer?.clear();
       this.matchTimeoutTimer?.clear();
 
       let outcome: FinalizeMatchOutcome | null = null;
       try {
-        outcome = await finalizeMatch(this.matchId, engine.gameId as GameId, this.playerIds, result, this.gameState);
+        outcome = await finalizeMatch(
+          this.matchId,
+          engine.gameId as GameId,
+          this.playerIds,
+          result,
+          engine.serializeStateForPersistence?.(this.gameState) ?? this.gameState,
+        );
       } catch (error) {
         // The match is over either way, but the rating/history write didn't
         // land. Say so rather than showing a rating change that isn't real —
         // abortStaleActiveMatches() will reap the still-ACTIVE row at next boot.
         console.error(`Failed to finalize match ${this.matchId}:`, error);
+      }
+
+      if (solvedElapsedMs !== null && result.winnerId && timedPersonalBestMode) {
+        try {
+          await recordTimedPersonalBest(result.winnerId, engine.gameId as GameId, timedPersonalBestMode, solvedElapsedMs);
+        } catch (error) {
+          // The ranked outcome remains valid if the ancillary PB write fails.
+          console.error(`Failed to record ranked personal best for ${result.winnerId}:`, error);
+        }
       }
 
       this.broadcastState(outcome?.result ?? result);

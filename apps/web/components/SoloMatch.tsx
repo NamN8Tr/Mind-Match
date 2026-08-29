@@ -4,6 +4,7 @@ import type { Room } from "@colyseus/sdk";
 import type { SoloResultMessage, WordleMove, WordleStateView } from "@smart-rot/shared-types";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
+import { GameHelpDialog } from "./GameHelpDialog";
 import { WordleBoard } from "./WordleBoard";
 import { WordleKeyboard } from "./WordleKeyboard";
 import { WordleNotice, type WordleNoticeMessage } from "./WordleNotice";
@@ -46,6 +47,7 @@ export function SoloMatch({ room, onExit }: { room: Room; onExit: () => void }) 
   const [submitting, setSubmitting] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
   const [confirmingExit, setConfirmingExit] = useState(false);
+  const [showingHelp, setShowingHelp] = useState(false);
   const guessCountRef = useRef<number | null>(null);
   const abandonButtonRef = useRef<HTMLButtonElement | null>(null);
   const moveNoticeIdRef = useRef(0);
@@ -133,6 +135,7 @@ export function SoloMatch({ room, onExit }: { room: Room; onExit: () => void }) 
     phase === "active" &&
     result === null &&
     !confirmingExit &&
+    !showingHelp &&
     !connectionLost &&
     !view.self.solved &&
     view.self.guessesRemaining > 0 &&
@@ -226,7 +229,10 @@ export function SoloMatch({ room, onExit }: { room: Room; onExit: () => void }) 
           <span aria-hidden="true">←</span> Back
         </button>
         <span className="match-mode-badge match-mode-speed">Solo</span>
-        <span className="match-timer"><span aria-hidden="true">◷</span> {formatTime(elapsed)}</span>
+        <div className="match-toolbar-actions">
+          <button type="button" className="match-help-button" onClick={() => setShowingHelp(true)}><span aria-hidden="true">?</span> Help</button>
+          <span className="match-timer"><span aria-hidden="true">◷</span> {formatTime(elapsed)}</span>
+        </div>
       </div>
       <WordleNotice notice={moveNotice} />
       <WordleBoard
@@ -236,6 +242,27 @@ export function SoloMatch({ room, onExit }: { room: Room; onExit: () => void }) 
         pendingInput={result ? undefined : inputValue}
       />
       {!result && <WordleKeyboard guesses={view.self.guesses} disabled={!canPlay || submitting} onKey={handleKey} />}
+
+      {showingHelp && !result && (
+        <GameHelpDialog eyebrow="Wordle · Solo" title="How to play Wordle" onClose={() => setShowingHelp(false)}>
+          <section>
+            <h3>Goal</h3>
+            <p>Find the hidden five-letter word in six valid guesses.</p>
+          </section>
+          <section>
+            <h3>Read the tiles</h3>
+            <ul>
+              <li>Green means the letter is correct and in the correct position.</li>
+              <li>Yellow means the letter is in the word but belongs in another position.</li>
+              <li>Gray means the letter is not used in the answer.</li>
+            </ul>
+          </section>
+          <section>
+            <h3>This mode</h3>
+            <p>Type with your keyboard or use the on-screen keys, then press Enter. Solve as quickly as possible to set a personal best.</p>
+          </section>
+        </GameHelpDialog>
+      )}
 
       {confirmingExit && !result && (
         <div className="confirm-backdrop" role="presentation" onClick={() => setConfirmingExit(false)}>

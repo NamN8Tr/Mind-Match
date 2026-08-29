@@ -17,7 +17,16 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { deleteMe, getMe, type MeResponse, updateUsername } from "../lib/api";
 
-type AccountView = "profile" | "personal-bests";
+type AccountView = "profile" | "achievements";
+
+const ACHIEVEMENT_MODES = [
+  { gameId: "wordle", mode: "speed", gameLabel: "Wordle", modeLabel: "Speed", timed: true },
+  { gameId: "wordle", mode: "fewest-guesses", gameLabel: "Wordle", modeLabel: "Fewest Guesses", timed: false },
+  { gameId: "spider", mode: "1-suit", gameLabel: "Spider", modeLabel: "1 Suit", timed: true },
+  { gameId: "spider", mode: "2-suit", gameLabel: "Spider", modeLabel: "2 Suits", timed: true },
+  { gameId: "spider", mode: "3-suit", gameLabel: "Spider", modeLabel: "3 Suits", timed: true },
+  { gameId: "spider", mode: "4-suit", gameLabel: "Spider", modeLabel: "4 Suits", timed: true },
+] as const;
 
 function ProfileIcon() {
   return (
@@ -55,7 +64,8 @@ function formatGame(gameId: string): string {
 
 function formatMode(mode: string): string {
   if (mode === "fewest-guesses") return "Fewest Guesses";
-  if (mode === "speed") return "Speed · Solo";
+  if (mode === "speed") return "Speed";
+  if (/^[1-4]-suit$/.test(mode)) return `${mode[0]} ${mode[0] === "1" ? "Suit" : "Suits"}`;
   return mode;
 }
 
@@ -106,7 +116,7 @@ function ClerkProfile() {
   );
 }
 
-function PersonalBestsPanel() {
+function AchievementsPanel() {
   const { getToken } = useAuth();
   const [profile, setProfile] = useState<MeResponse | null>(null);
   const [error, setError] = useState(false);
@@ -126,34 +136,68 @@ function PersonalBestsPanel() {
     };
   }, [getToken]);
 
-  const speedSoloBest = profile?.personalBests.find((best) => best.gameId === "wordle" && best.mode === "speed");
   const additionalBests = profile?.personalBests.filter(
-    (best) => best.gameId !== "wordle" || best.mode !== "speed",
+    (best) =>
+      !ACHIEVEMENT_MODES.some((achievement) => achievement.gameId === best.gameId && achievement.mode === best.mode) &&
+      !(best.gameId === "spider" && best.mode === "speed"),
   );
 
   return (
-    <section className="account-personal-bests" aria-labelledby="personal-bests-title">
-      <h2 id="personal-bests-title">Personal Bests</h2>
-      {error && <p className="account-personal-bests-error">Could not load personal bests.</p>}
+    <section className="account-personal-bests" aria-labelledby="achievements-title">
+      <div className="account-achievements-heading">
+        <h2 id="achievements-title">Achievements</h2>
+        <p>Ranked wins and fastest completed games.</p>
+      </div>
+      {error && <p className="account-personal-bests-error">Could not load achievements.</p>}
       {!error && !profile && <p className="account-personal-bests-loading">Loading…</p>}
       {!error && profile && (
         <>
-          <div className="account-personal-best-row">
-            <div>
-              <strong>Wordle</strong>
-              <span>Speed · Solo</span>
-            </div>
-            <span className="account-personal-best-time">
-              {speedSoloBest ? formatTime(speedSoloBest.bestTimeMs) : "—"}
-            </span>
-          </div>
+          {ACHIEVEMENT_MODES.map((achievement) => {
+            const best = profile.personalBests.find(
+              (entry) =>
+                entry.gameId === achievement.gameId &&
+                (entry.mode === achievement.mode ||
+                  (achievement.gameId === "spider" && achievement.mode === "1-suit" && entry.mode === "speed")),
+            );
+            const wins = profile.rankedWins.find(
+              (entry) => entry.gameId === achievement.gameId && entry.mode === achievement.mode,
+            )?.wins ?? 0;
+            return (
+              <div className="account-personal-best-row" key={`${achievement.gameId}-${achievement.mode}`}>
+                <div className="account-achievement-copy">
+                  <strong>{achievement.gameLabel}</strong>
+                  <span>
+                    {achievement.modeLabel}
+                    {achievement.timed ? " · Solo or ranked best" : " · Ranked"}
+                  </span>
+                </div>
+                <div className="achievement-stats">
+                  <span className="achievement-stat">
+                    <small>Wins</small>
+                    <strong>{wins}</strong>
+                  </span>
+                  {achievement.timed && (
+                    <span className="achievement-stat">
+                      <small>Best</small>
+                      <strong>{best ? formatTime(best.bestTimeMs) : "—"}</strong>
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
           {additionalBests?.map((best) => (
             <div className="account-personal-best-row" key={`${best.gameId}-${best.mode}`}>
-              <div>
+              <div className="account-achievement-copy">
                 <strong>{formatGame(best.gameId)}</strong>
                 <span>{formatMode(best.mode)}</span>
               </div>
-              <span className="account-personal-best-time">{formatTime(best.bestTimeMs)}</span>
+              <div className="achievement-stats">
+                <span className="achievement-stat">
+                  <small>Best</small>
+                  <strong>{formatTime(best.bestTimeMs)}</strong>
+                </span>
+              </div>
             </div>
           ))}
         </>
@@ -204,12 +248,12 @@ function AccountDialog({
               Profile
             </button>
             <button
-              aria-current={view === "personal-bests" ? "page" : undefined}
-              onClick={() => setView("personal-bests")}
+              aria-current={view === "achievements" ? "page" : undefined}
+              onClick={() => setView("achievements")}
               type="button"
             >
               <TrophyIcon />
-              Personal Bests
+              Achievements
             </button>
           </nav>
         </aside>
@@ -221,7 +265,7 @@ function AccountDialog({
             }
           }}
         >
-          {view === "profile" ? <ClerkProfile /> : <PersonalBestsPanel />}
+          {view === "profile" ? <ClerkProfile /> : <AchievementsPanel />}
         </div>
       </section>
     </div>

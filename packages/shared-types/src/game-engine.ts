@@ -76,6 +76,12 @@ export interface GameEngine<State, Move> {
   getTimeoutResult?(state: State): MatchResult;
 
   /**
+   * Optional compact form used for match history. Runtime-only data such as an
+   * undo stack can be omitted without weakening the authoritative live state.
+   */
+  serializeStateForPersistence?(state: State): unknown;
+
+  /**
    * Produces the view of state sent to a specific player, e.g. hiding an
    * opponent's in-progress guesses. `matchResult` is present when orchestration
    * ended the match outside the engine's own terminal rules (for example a

@@ -69,7 +69,7 @@ test("/health is public", async () => {
   assert.deepEqual(response.json(), { status: "ok" });
 });
 
-test("/api/me returns the caller's internal id and seeds both mode ratings", async () => {
+test("/api/me returns the caller's internal id and seeds every supported rating pool", async () => {
   const subject = `${USER_PREFIX}${randomUUID()}`;
   const response = await app.inject({
     method: "GET",
@@ -83,6 +83,7 @@ test("/api/me returns the caller's internal id and seeds both mode ratings", asy
     displayName: string;
     ratings: { gameId: string; mode: string; rating: number; userId: string }[];
     personalBests: unknown[];
+    rankedWins: Array<{ gameId: string; mode: string; wins: number }>;
   };
 
   const user = await prisma.user.findUniqueOrThrow({ where: { authSubject: subject } });
@@ -93,11 +94,16 @@ test("/api/me returns the caller's internal id and seeds both mode ratings", asy
   const fewest = body.ratings.find((rating) => rating.gameId === "wordle" && rating.mode === "fewest-guesses");
   assert.ok(speed, "a new player should be seeded with a Speed rating");
   assert.ok(fewest, "a new player should be seeded with a Fewest Guesses rating");
+  const spiderRatings = body.ratings.filter((rating) => rating.gameId === "spider");
+  assert.equal(spiderRatings.length, 4, "a new player should be seeded in every Spider suit pool");
   assert.equal(speed.rating, DEFAULT_GLICKO2_RATING);
   assert.equal(fewest.rating, DEFAULT_GLICKO2_RATING);
+  assert.ok(spiderRatings.every((rating) => rating.rating === DEFAULT_GLICKO2_RATING));
   assert.equal(speed.userId, user.id, "ratings must be keyed by the internal user id");
   assert.equal(fewest.userId, user.id, "both mode ratings must belong to the internal user id");
   assert.deepEqual(body.personalBests, []);
+  assert.equal(body.rankedWins.length, 6, "every supported ranked mode should have a win counter");
+  assert.ok(body.rankedWins.every((entry) => entry.wins === 0), "new players should start with zero wins");
 });
 
 test("a player can update their username with server-side validation", async () => {
@@ -227,12 +233,31 @@ test("a signed-in player can view another player's safe public profile", async (
   };
   assert.equal(body.id, player.id);
   assert.equal(body.displayName, "Public_Player");
-  assert.equal(body.ratings.length, 2);
+  assert.equal(body.ratings.length, 6);
   assert.equal(body.personalBests[0]?.bestTimeMs, 12_345);
   assert.deepEqual(body.stats, { rankedMatches: 1, wins: 1, draws: 0, losses: 0 });
   assert.equal(body.matches[0]?.matchId, match.id);
   assert.ok(body.matches[0]?.players.some((entry) => entry.userId === viewer.id));
   assert.equal(body.authSubject, undefined, "the public profile must never expose the Clerk subject");
+
+  const ownProfileResponse = await app.inject({
+    method: "GET",
+    url: "/api/me",
+    headers: { authorization: `Bearer ${playerSubject}` },
+  });
+  const ownProfile = ownProfileResponse.json() as {
+    rankedWins: Array<{ gameId: string; mode: string; wins: number }>;
+  };
+  assert.equal(
+    ownProfile.rankedWins.find((entry) => entry.gameId === "wordle" && entry.mode === "speed")?.wins,
+    1,
+    "a completed ranked win should be counted in its exact mode",
+  );
+  assert.equal(
+    ownProfile.rankedWins.find((entry) => entry.gameId === "wordle" && entry.mode === "fewest-guesses")?.wins,
+    0,
+    "wins from one mode must not spill into another",
+  );
 
   const missing = await app.inject({
     method: "GET",
