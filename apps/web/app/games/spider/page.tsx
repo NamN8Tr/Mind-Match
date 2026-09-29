@@ -7,7 +7,7 @@ export default function SpiderPage() {
       when="signed-in"
       fallback={
         <div className="card">
-          <h2 style={{ marginTop: 0 }}>Spider Sprint</h2>
+          <h2 style={{ marginTop: 0 }}>Spider</h2>
           <p className="muted">Sign in to race a guaranteed-solvable board or play a timed solo run.</p>
         </div>
       }

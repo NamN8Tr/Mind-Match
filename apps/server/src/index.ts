@@ -3,6 +3,7 @@ import { buildApp } from "./app.js";
 import { createColyseusServer } from "./colyseus-server.js";
 import { env } from "./env.js";
 import { abortStaleActiveMatches } from "./matchmaking/match-service.js";
+import { spiderBoardPool } from "./spider-board-pool/service.js";
 
 async function main(): Promise<void> {
   const app = await buildApp();
@@ -13,7 +14,13 @@ async function main(): Promise<void> {
 
   await app.listen({ port: env.port, host: "0.0.0.0" });
 
-  const colyseus = createColyseusServer();
+  try {
+    await spiderBoardPool.start();
+  } catch (error) {
+    app.log.warn({ error }, "Spider solver worker unavailable; bundled verified boards remain active");
+  }
+
+  const colyseus = createColyseusServer({ spiderBoardPool });
   await colyseus.listen(env.colyseusPort);
 
   app.log.info(`REST API listening on :${env.port}, Colyseus WS listening on :${env.colyseusPort}`);

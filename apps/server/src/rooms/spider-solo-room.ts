@@ -12,15 +12,19 @@ import { resolveAuthenticatedUser } from "../auth/clerk.js";
 import { recordTimedPersonalBest } from "../personal-best/service.js";
 
 const COUNTDOWN_MS = 3_000;
-const RUN_TIMEOUT_MS = 30 * 60_000;
+/** A run ends only after this long with no accepted move — there is no cap on a run's length. */
+const IDLE_TIMEOUT_MS = 10 * 60_000;
 const RECONNECT_GRACE_SECONDS = 20;
 const DISPOSE_DELAY_MS = 5_000;
 
 export interface SpiderSoloRoomOptions {
   countdownMs?: number;
-  runTimeoutMs?: number;
+  /** How long a run may sit with no accepted move before it is abandoned. Default 10 minutes. */
+  idleTimeoutMs?: number;
   /** Test seam only. Production uses a cryptographically random seed. */
   seedFactory?: () => string;
+  /** Claims and pins an ahead-of-time board before synchronous engine state creation. */
+  prepareSeed?: (seed: string) => Promise<void>;
 }
 
 interface SoloAuth {
@@ -36,8 +40,9 @@ export function createSpiderSoloRoom(
   options: SpiderSoloRoomOptions = {},
 ) {
   const countdownMs = options.countdownMs ?? COUNTDOWN_MS;
-  const runTimeoutMs = options.runTimeoutMs ?? RUN_TIMEOUT_MS;
+  const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
   const seedFactory = options.seedFactory ?? randomUUID;
+  const prepareSeed = options.prepareSeed;
 
   return class SpiderSoloRoom extends Room {
     maxClients = 1;
@@ -53,6 +58,8 @@ export function createSpiderSoloRoom(
     private runDeadlineAt?: number;
     private countdownTimer?: Delayed;
     private runTimer?: Delayed;
+    /** When the last accepted move landed; the idle window is measured from here. */
+    private lastActivityAt?: number;
 
     onCreate(): void {
       this.onMessage("ready", (client) => this.handleReady(client));
@@ -64,10 +71,12 @@ export function createSpiderSoloRoom(
       return { userId: user.id };
     }
 
-    onJoin(_client: Client, _options: unknown, auth: SoloAuth): void {
+    async onJoin(_client: Client, _options: unknown, auth: SoloAuth): Promise<void> {
       this.autoDispose = false;
       this.userId = auth.userId;
-      this.gameState = engine.generateInitialState(seedFactory(), [auth.userId]);
+      const seed = seedFactory();
+      await prepareSeed?.(seed);
+      this.gameState = engine.generateInitialState(seed, [auth.userId]);
     }
 
     onDrop(client: Client): void {
@@ -113,10 +122,11 @@ export function createSpiderSoloRoom(
       }
       this.started = true;
       this.runStartedAt = now;
-      this.runDeadlineAt = now + runTimeoutMs;
+      this.lastActivityAt = now;
+      this.runDeadlineAt = now + idleTimeoutMs;
       this.broadcast("phase", "active");
       this.broadcast("clock", { startedAt: now, deadlineAt: this.runDeadlineAt, serverNow: now });
-      this.runTimer = this.clock.setTimeout(() => void this.conclude(false), runTimeoutMs);
+      this.armIdleTimeout(idleTimeoutMs);
     }
 
     private async handleMove(client: Client, move: SpiderMove): Promise<void> {
@@ -134,12 +144,28 @@ export function createSpiderSoloRoom(
 
       this.processingMove = true;
       this.gameState = engine.applyMove(this.gameState, move, this.userId).state;
+      this.lastActivityAt = Date.now();
+      this.runDeadlineAt = this.lastActivityAt + idleTimeoutMs;
       if (engine.isTerminal(this.gameState)) {
         await this.conclude(this.gameState.players[this.userId]?.solved === true);
       } else {
         this.sendState(client);
       }
       this.processingMove = false;
+    }
+
+    private armIdleTimeout(delayMs: number): void {
+      this.runTimer?.clear();
+      this.runTimer = this.clock.setTimeout(() => {
+        // Moves roll the window forward without touching the timer, so this may
+        // fire on a window that has since moved; re-arm for whatever is left.
+        const idleForMs = Date.now() - (this.lastActivityAt ?? Date.now());
+        if (idleForMs < idleTimeoutMs) {
+          this.armIdleTimeout(idleTimeoutMs - idleForMs);
+          return;
+        }
+        void this.conclude(false);
+      }, delayMs);
     }
 
     private async conclude(solved: boolean): Promise<void> {

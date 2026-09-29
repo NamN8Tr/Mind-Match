@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SpiderCard, SpiderSuit } from "@smart-rot/shared-types";
-import { findSpiderAutoMoveDestination, nextSpiderHintCursor } from "./spider-hints.js";
+import type { SpiderCard, SpiderPlayerView, SpiderSuit } from "@smart-rot/shared-types";
+import { findSpiderAutoMoveDestination, getSpiderHintMoves, nextSpiderHintCursor } from "./spider-hints.js";
 
 let cardId = 0;
 function card(rank: number, suit: SpiderSuit = "spades", faceUp = true): SpiderCard {
@@ -40,6 +40,39 @@ test("auto move rejects a broken or face-down stack", () => {
   const broken = [[card(6), card(5, "hearts")], [card(7)], []];
   assert.equal(findSpiderAutoMoveDestination(broken, 0, 0), null);
   assert.equal(findSpiderAutoMoveDestination([[card(6, "spades", false)], []], 0, 0), null);
+});
+
+test("hints move only the deepest movable same-suit run, never a smaller suffix", () => {
+  const player: SpiderPlayerView = {
+    columns: [
+      [card(13, "hearts", false), card(5), card(4)],
+      [card(5)],
+      [card(6)],
+      [card(12)],
+      [card(11)],
+      [card(10)],
+      [card(12, "hearts", false), card(9, "hearts"), card(8), card(7)],
+      [card(9)],
+      [card(3)],
+      [card(2)],
+    ],
+    stock: [],
+    completedSuits: [],
+    completedRuns: 0,
+    moveCount: 0,
+    resetCount: 0,
+    solved: false,
+    canUndo: false,
+  };
+
+  const hints = getSpiderHintMoves(player);
+  const firstColumnHints = hints.filter((hint) => hint.fromColumn === 0);
+  const seventhColumnHints = hints.filter((hint) => hint.fromColumn === 6);
+
+  assert.ok(firstColumnHints.length > 0);
+  assert.ok(firstColumnHints.every((hint) => hint.cardIndex === 1 && hint.rank === 5 && hint.cardCount === 2));
+  assert.ok(seventhColumnHints.length > 0);
+  assert.ok(seventhColumnHints.every((hint) => hint.cardIndex === 2 && hint.rank === 8 && hint.cardCount === 2));
 });
 
 test("hints recommend an empty column after every helpful move has been shown", () => {

@@ -10,13 +10,9 @@ import { getColyseusClient } from "../lib/colyseus";
 import { getMatchHistory, getMe, type MatchHistoryEntry, type MeResponse } from "../lib/api";
 import { saveActiveMatch } from "../lib/match-storage";
 import { setPendingMatchRoom } from "../lib/pending-match";
+import { formatTime } from "../lib/format";
 
 type Phase = "idle" | "queueing" | "starting-solo";
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.floor(milliseconds / 100);
-  return `${Math.floor(totalTenths / 600)}:${String(Math.floor((totalTenths % 600) / 10)).padStart(2, "0")}.${totalTenths % 10}`;
-}
 
 const WORDLE_MODES: Array<{
   id: WordleMode;

@@ -8,7 +8,8 @@
   "packageManager": "pnpm@11.24.0",
   "scripts": {
     "launch": "./scripts/dev.sh",
-    "build": "turbo run build",
+    "build": "sh tools/spider-solver/build.sh && turbo run build",
+    "build:spider-solver": "sh tools/spider-solver/build.sh",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "test": "turbo run test",

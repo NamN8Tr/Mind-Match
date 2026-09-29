@@ -15,10 +15,11 @@ import { createMatchmakingRoom } from "./matchmaking/matchmaking-room.js";
 import { createGameRoom, type GameRoomOptions } from "./rooms/create-game-room.js";
 import { createWordleSoloRoom, type WordleSoloRoomOptions } from "./rooms/wordle-solo-room.js";
 import { createSpiderSoloRoom } from "./rooms/spider-solo-room.js";
+import type { SpiderBoardPool } from "./spider-board-pool/service.js";
 
 /**
- * Wires up every game plugin's match room + matchmaking queue. Adding a new
- * game (Phase 2+) means one more `wordleEngine`-shaped import and two more
+ * Wires up every game plugin's match room + matchmaking queue (+ solo room for
+ * timed modes). Adding a game or mode means one engine per mode and its
  * `.define()` calls here — matchmaking/rating/persistence code is unaffected.
  *
  * Runs on its own http.Server (see env.colyseusPort) rather than sharing
@@ -35,6 +36,8 @@ export interface ColyseusServerOptions {
   gameRoom?: GameRoomOptions;
   /** Optional solo timings/seed seam for integration tests. */
   soloRoom?: WordleSoloRoomOptions;
+  /** Persistent random Spider inventory. Omitted by isolated integration tests. */
+  spiderBoardPool?: SpiderBoardPool;
 }
 
 export function createColyseusServer(options: ColyseusServerOptions = {}): Server {
@@ -63,13 +66,21 @@ export function createColyseusServer(options: ColyseusServerOptions = {}): Serve
       matchRoomName,
       createGameRoom(variant.engine, {
         ...options.gameRoom,
-        matchTimeoutMs: options.gameRoom?.matchTimeoutMs ?? 15 * 60_000,
+        idleTimeoutMs: options.gameRoom?.idleTimeoutMs ?? 10 * 60_000,
         departurePolicy: "continue-until-both-leave",
         timedPersonalBestMode: variant.mode,
+        prepareSeed: options.spiderBoardPool
+          ? async (seed) => { await options.spiderBoardPool!.prepareSeed(seed, variant.mode); }
+          : undefined,
       }),
     );
     gameServer.define(`${matchRoomName}_matchmaking`, createMatchmakingRoom("spider", variant.mode, matchRoomName));
-    gameServer.define(`${matchRoomName}_solo`, createSpiderSoloRoom(variant.engine, options.soloRoom));
+    gameServer.define(`${matchRoomName}_solo`, createSpiderSoloRoom(variant.engine, {
+      ...options.soloRoom,
+      prepareSeed: options.spiderBoardPool
+        ? async (seed) => { await options.spiderBoardPool!.prepareSeed(seed, variant.mode); }
+        : undefined,
+    }));
   }
 
   return gameServer;

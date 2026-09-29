@@ -119,3 +119,20 @@ model MatchParticipant {
   @@index([userId])
   @@map("match_participants")
 }
+
+/// Solver-certified Spider deals waiting to be claimed by a room. The complete
+/// winning witness is stored inside `deal` and replayed before insertion.
+model SpiderBoard {
+  id             String   @id @default(cuid())
+  mode           String
+  deal           Json
+  solverSeed     String
+  solverStates   Int
+  solverTimeMs   Int
+  solutionMoves  Int
+  difficultyScore Int
+  createdAt      DateTime @default(now())
+
+  @@index([mode, createdAt])
+  @@map("spider_boards")
+}

@@ -1,6 +1,6 @@
 # Smart Rot project context and handoff
 
-Last updated: August 27, 2026
+Last updated: September 28, 2026
 
 Read this file before making changes. It records the product intent, what has
 already been built, why several non-obvious architecture choices exist, how the
@@ -14,8 +14,9 @@ Smart Rot is a ranked, head-to-head puzzle platform modeled on the product loop
 of chess sites: authenticate, enter a game-specific matchmaking queue, play a
 short server-authoritative match, receive a per-game-mode rating update, and review
 match history. Timed modes also support unranked solo runs and server-recorded
-personal bests. Wordle is the proving vertical slice. The planned order after
-it is Sudoku, Minesweeper, bots, then Spider Solitaire and additional games.
+personal bests. Wordle was the proving vertical slice. Spider Solitaire came
+next, ahead of the original plan (see history §18–19). The remaining order is
+Sudoku, Minesweeper, bots, then additional games.
 
 The durable product rules from the original brief are:
 
@@ -26,7 +27,8 @@ The durable product rules from the original brief are:
 - Future bots submit moves through the same validated path as people.
 - No wagering, wallets, token purchases, withdrawals, or other real-money
   features belong in the current scope.
-- Do not start multiple games in parallel. Prove the Wordle slice first.
+- Do not start multiple games in parallel. Finish and verify one game before
+  starting the next.
 
 ## Decisions already made
 
@@ -40,6 +42,7 @@ The durable product rules from the original brief are:
 | Ephemeral coordination | Redis | Queue/match session locks and Colyseus presence/driver state |
 | Rating | Glicko-2, displayed starting rating 400 and deviation 100 | Per-mode, opponent-sensitive rating movement on a beginner-friendly scale |
 | First game | Competitive Wordle race | Cheapest end-to-end proof of the shared platform |
+| Spider deal supply | C++17 solver worker + Postgres `spider_boards` pool + bundled verified fallback | Deals must be provably solvable, but engine state creation is synchronous and 4-suit searches take minutes |
 
 Do not replace these foundations casually. A new game should normally be a new
 engine plus registration and UI, not a rewrite of authentication, matchmaking,
@@ -413,6 +416,101 @@ Wordle guesses, or active matches. Missing player ids return 404. A link opened
 during a live match targets a new browser tab so inspecting the opponent does
 not navigate away from—and forfeit—the current room.
 
+### 18. Spider Solitaire — commits `a0ce16f` and `fe7ae8d`
+
+Spider was added as the second `GameEngine` plugin ahead of the original plan.
+That also tested whether the generic layers could take a very different game
+unchanged.
+
+`a0ce16f` introduced a one-suit Spider engine, a single-player
+`createSpiderSoloRoom`, and the `/games/spider` lobby and solo route. That first
+mode was persisted as `speed`. Those legacy rating and personal-best rows are
+treated as the 1-suit pool. On the web this mapping is centralized in
+`isSameMode()` in `apps/web/lib/achievements.ts`.
+
+`fe7ae8d` expanded it into the current shape:
+
+- **Four independent modes** (`1-suit`, `2-suit`, `3-suit`, `4-suit`), each with
+  its own match room, matchmaking queue, solo room, and Glicko-2 pool. Room
+  names are `spider_<n>_suit`, `spider_<n>_suit_matchmaking`, and
+  `spider_<n>_suit_solo`.
+- **Rules:** ten columns, five stock deals, eight runs to clear. Multi-card moves
+  must be a face-up, same-suit descending run. Drawing is allowed with empty
+  columns. Take back (undo) and reset are unlimited and count as moves. The undo
+  stack is live-only and is omitted from persisted match state through the new
+  optional `GameEngine.serializeStateForPersistence`.
+- **Privacy:** the opponent view carries only progress counters (runs cleared,
+  moves, remaining cards and deals, resets, solved), never cards.
+- **Ranked semantics, through room options rather than branches in
+  `createGameRoom`:**
+  - `departurePolicy: "continue-until-both-leave"` means one player leaving is
+    not a forfeit. The other keeps playing, and the match draws only when both
+    have left.
+  - `timedPersonalBestMode` records a ranked solve's server time in the same
+    per-mode personal-best pool as solo.
+  - The first player to clear all eight runs wins. Simultaneous solves draw.
+- **Solvable deals.** Every deal must be solvable. At this commit, an in-process
+  generator searched for a solvable opening while the room was being created.
+- **UI:**
+  - Drag-and-drop plus tap-to-auto-move. `findSpiderAutoMoveDestination` prefers
+    same suit, then any suit, then an empty column.
+  - Hints that cycle through moves which flip a card or build a same-suit run,
+    in `apps/web/lib/spider-hints.ts`.
+  - A shared `GameHelpDialog` and court-card artwork.
+- **Achievements.** The account modal's second tab became Achievements, showing
+  ranked wins per mode and best times for timed modes. `/api/me` gained
+  `rankedWins`.
+
+### 19. Solver-certified Spider board pool
+
+Searching for a solvable opening while the room was being created cost too much,
+especially for 3- and 4-suit deals, so board production moved out of the room
+path entirely:
+
+- `tools/spider-solver` is an independent, dependency-free C++17 bounded search
+  worker. It prints one JSON result and never labels a timed-out deal
+  unsolvable. `pnpm build`, `pnpm build:spider-solver`, and `scripts/dev.sh`
+  compile it into the gitignored `tools/spider-solver/bin/`.
+- `SpiderBoardPool` (`apps/server/src/spider-board-pool/service.ts`) starts at
+  boot and refills each mode round-robin up to 10 / 10 / 20 / 30 boards (1–4
+  suits). It uses per-mode solver budgets and a per-mode Redis refill lock, and
+  rejects deals below a minimum difficulty (states searched, solution length).
+  Every solution is replayed by `verifySpiderDeal` in the TypeScript engine
+  before insertion into `spider_boards` (migration
+  `20260830200000_add_spider_board_pool`).
+- A new `prepareSeed` room hook claims the oldest board with a serializable
+  delete-on-claim. `registerSpiderDealAssignment()` then pins it to the room seed
+  before the synchronous `generateInitialState`, so both ranked players receive
+  the identical deal.
+- Without a stored board or solver binary, the engine deals from the bundled
+  `verified-board-pool.json`. It applies seeded column and suit permutations
+  that keep the saved solution valid. Boot logs a warning and continues.
+- Spider rooms switched from wall-clock caps (15 minutes ranked, 30 minutes
+  solo) to a 10-minute idle timeout (`idleTimeoutMs`). A long, active game is
+  never cut off, only an abandoned one. The UI shows elapsed time only, so the
+  rolling deadline is not re-broadcast.
+- Spider's rules copy moved into `apps/web/components/SpiderHelp.tsx`, shared by
+  the lobby and in-game help.
+
+The repository now has 73 automated tests: 28 server (17 realtime integration,
+9 REST, 2 board pool), 31 game-engine (13 Wordle, 18 Spider), 6 Glicko-2, and 8
+web.
+
+### 20. Repository tidy-up — September 28, 2026
+
+- Added a root `CLAUDE.md` for coding agents.
+- `apps/web` gained a `test` script, so the Spider hint tests run under
+  `pnpm test`.
+- `apps/web/next-env.d.ts` is now gitignored. The Next 16 docs recommend this,
+  and `next dev`/`next typegen` kept rewriting it. The web `typecheck` runs
+  `next typegen` first.
+- Duplicated web helpers were consolidated into `apps/web/lib/format.ts` (time
+  formatting) and `apps/web/lib/achievements.ts` (mode catalog, legacy-mode
+  mapping). Unused CSS rules and dead Spider aliases were removed.
+- The Spider ranked page now loads profile and room with `Promise.allSettled`,
+  like the Wordle page (§7). A failed profile fetch can no longer strand a
+  seated connection.
+
 ## Fixed Clerk test-account policy
 
 Use only these two persistent test identities for this project:
@@ -502,17 +600,38 @@ match. The match owns it after that and `finalizeMatch()` releases it. Preserve
 that ownership transition so an error cannot leave permanent duplicate-session
 blocks.
 
+### Game differences go through the contract, not the room
+
+Spider needed different departure, timeout, personal-best, and seeding
+behavior. Each difference became an optional `GameEngine` method
+(`getTimeoutResult`, `serializeStateForPersistence`) or a `GameRoomOptions`
+field (`departurePolicy`, `idleTimeoutMs`, `timedPersonalBestMode`,
+`prepareSeed`). `createGameRoom` still has no game-specific branches. Keep it
+that way for Sudoku and Minesweeper.
+
+### Spider deals are certified before use
+
+A Spider deal reaches a player only with a solution that the TypeScript engine
+has replayed to a win. Solver output is untrusted input. Never insert into
+`spider_boards` without `verifySpiderDeal`, and never add a path that deals an
+unverified random board. `registerSpiderDealAssignment()` is process-local, so
+`prepareSeed` must run in the same process as the room's `generateInitialState`.
+
 ## Current verification matrix
 
 | Surface | Status | Evidence |
 | --- | --- | --- |
 | Wordle modes, rules, and privacy serialization | Passing | 13 package tests |
+| Spider rules, deal shape, solution verifier, pool pinning, and opponent privacy | Passing | 18 package tests |
+| Spider hint ordering and auto-move destinations | Passing | 8 web tests |
 | Glicko-2 calculation | Passing | 6 package tests, including the canonical worked example and opponent-strength ordering |
 | REST auth, identity mapping, profile editing/deletion, public player profiles, personal bests, history, CORS | Passing | 9 server tests |
-| Matchmaking/modes/countdown/clock/lifecycle/reconnect/finalization and Speed Solo | Passing | 15 server integration tests |
-| Live Clerk JWT + local REST/realtime + persistence | Passing | `smoke:live` run on August 27, 2026 |
-| Typecheck, ESLint, production builds | Passing with the live smoke and test-isolation changes included | Root commands below |
-| Next.js + Clerk rendered UI in two browser sessions | Partially verified | Same-room play, persistence, and no instant refresh-forfeit verified; resumed-board completion remains |
+| Wordle matchmaking/modes/countdown/clock/lifecycle/reconnect/finalization and Speed Solo | Passing | 15 server integration tests |
+| Spider shared board, departure policy, and both-leave draw | Passing | 2 server integration tests |
+| Spider board pool claim and seed pinning | Passing | 2 server tests |
+| Live Clerk JWT + local REST/realtime + persistence | Passing (Wordle only) | `smoke:live` run on August 27, 2026 |
+| Typecheck, ESLint, tests, production builds (including the solver) | Passing on September 28, 2026 | Root commands below |
+| Next.js + Clerk rendered UI in two browser sessions | Partially verified (Wordle); not recorded (Spider) | Wordle same-room play, persistence, and no instant refresh-forfeit verified; resumed-board completion remains |
 
 The live smoke is stronger than a mocked-auth test for the backend seams, but it
 does not prove Clerk's rendered sign-in components, client-side navigation,
@@ -521,13 +640,16 @@ experience. Those are the remaining browser-only checks.
 
 ## Local runbook
 
-Prerequisites: Node 20+, pnpm 11.24, PostgreSQL, and Redis. Docker Compose can
-run the data services; native Homebrew services also work.
+Prerequisites: Node 20+, pnpm 11.24, PostgreSQL, Redis, and a C++17 compiler
+for the Spider solver worker. Docker Compose can run the data services; native
+Homebrew services also work. `pnpm launch` (`scripts/dev.sh`) does all of the
+following in one step.
 
 ```bash
 pnpm install
 cp apps/server/.env.example apps/server/.env
 cp apps/web/.env.example apps/web/.env.local
+pnpm build:spider-solver
 pnpm --filter @smart-rot/server db:migrate
 pnpm --filter @smart-rot/server dev
 pnpm --filter @smart-rot/web dev
@@ -558,29 +680,44 @@ smoke uses the fixed Clerk identities above and retains them.
 ## Efficient continuation plan
 
 1. Keep all root gates green and keep the two-account live smoke rerunnable.
-2. Run one focused two-session pass through the new navigation and modes: edit
-   each profile username, then home → Wordle → Speed (verify opponent name,
-   mode rating, linked public profile, countdown, and refresh recovery) → history, then Fewest
-   Guesses (verify the first solver waits and lower guess count wins). Finish a
-   Speed Solo run and confirm the same PB appears in the lobby and profile.
+   Commit the solver-backed board pool (§19) once reviewed.
+2. Run one focused two-session pass:
+   - Edit each profile username.
+   - Home → Wordle → Speed. Verify opponent name, mode rating, linked public
+     profile, countdown, and refresh recovery, then check history.
+   - Fewest Guesses: verify the first solver waits and the lower guess count
+     wins.
+   - Finish a Speed Solo run and confirm the same PB appears in the lobby and
+     profile.
+   - Spider: play a ranked race in at least one suit mode. Verify both players
+     see the same deal, that one player leaving lets the other finish, and that
+     refresh recovers the board. Finish a solo run and confirm its PB appears
+     under Achievements.
+
    Record the result here.
-3. Treat any failure in that browser check as Phase 1 work. Do not paper over it
-   in the next game.
-4. After Phase 1 is visually verified, add Sudoku as a `GameEngine` plugin and
-   reuse matchmaking, lifecycle, finalization, and ratings unchanged. If those
-   generic layers need game-specific branches, stop and reconsider the contract.
-5. Add Minesweeper next, explicitly proving identical board generation from one
+3. Treat any failure in that browser check as work on the existing games. Do not
+   paper over it in the next game.
+4. Consider extending `smoke:live` to a Spider ranked race so the second game
+   has the same real-JWT coverage as Wordle.
+5. Add Sudoku as a `GameEngine` plugin and reuse matchmaking, lifecycle,
+   finalization, and ratings unchanged. If those generic layers need
+   game-specific branches, stop and reconsider the contract.
+6. Add Minesweeper next, explicitly proving identical board generation from one
    shared seed.
-6. Add the Wordle bot, then extract only the bot behavior that subsequent games
+7. Add the Wordle bot, then extract only the bot behavior that subsequent games
    genuinely share.
-7. Add Spider Solitaire and later games only after the plugin boundary has
-   survived the preceding variants.
 
 ## Known limitations and next work
 
 - The instant-forfeit half of the hard-refresh retest now passes. Confirming the
   refreshed board resumes and finishes the same match is still outstanding.
-- Only Wordle is registered; the roadmap games and bots are not implemented.
+- Wordle and Spider are registered; Sudoku, Minesweeper, and bots are not
+  implemented.
+- Spider's legacy `speed` rating/personal-best rows are mapped to 1-suit in the
+  web client rather than migrated. A data migration would remove the need for
+  `isSameMode()`, but it must merge rows where a user has both.
+- The Spider board pool's first fill after an empty database takes minutes for
+  3- and 4-suit. Until then those modes deal from the bundled boards.
 - There is no production deployment/observability setup yet.
 - Legal/compliance work for any future money feature is deliberately outside
   this codebase's present scope.

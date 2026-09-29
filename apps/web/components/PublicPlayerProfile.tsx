@@ -4,16 +4,11 @@ import { useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { getPlayerProfile, type PublicPlayerProfile as PublicPlayerProfileData } from "../lib/api";
+import { formatTime } from "../lib/format";
+import { isSameMode } from "../lib/achievements";
 
 interface PublicPlayerProfileProps {
   userId: string;
-}
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.floor(milliseconds / 100);
-  const minutes = Math.floor(totalTenths / 600);
-  const seconds = Math.floor((totalTenths % 600) / 10);
-  return `${minutes}:${String(seconds).padStart(2, "0")}.${totalTenths % 10}`;
 }
 
 function formatMode(mode: string): string {
@@ -114,7 +109,7 @@ export function PublicPlayerProfile({ userId }: PublicPlayerProfileProps) {
         <h2>Spider rating</h2>
         <div className="public-rating-grid">
           {["1-suit", "2-suit", "3-suit", "4-suit"].map((mode) => {
-            const rating = spiderRatings.find((entry) => entry.mode === mode || (mode === "1-suit" && entry.mode === "speed"));
+            const rating = spiderRatings.find((entry) => isSameMode("spider", entry.mode, mode));
             return <div className="public-rating-card" key={mode}><span>{formatMode(mode)}</span><strong>{rating ? Math.round(rating.rating) : "Unrated"}</strong></div>;
           })}
         </div>

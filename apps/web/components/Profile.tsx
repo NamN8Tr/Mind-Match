@@ -4,23 +4,8 @@ import { useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import { type FormEvent, useEffect, useState } from "react";
 import { getMe, type MeResponse, updateUsername } from "../lib/api";
-
-const ACHIEVEMENT_MODES = [
-  { gameId: "wordle", mode: "speed", gameLabel: "Wordle", modeLabel: "Speed", timed: true },
-  { gameId: "wordle", mode: "fewest-guesses", gameLabel: "Wordle", modeLabel: "Fewest Guesses", timed: false },
-  { gameId: "spider", mode: "1-suit", gameLabel: "Spider", modeLabel: "1 Suit", timed: true },
-  { gameId: "spider", mode: "2-suit", gameLabel: "Spider", modeLabel: "2 Suits", timed: true },
-  { gameId: "spider", mode: "3-suit", gameLabel: "Spider", modeLabel: "3 Suits", timed: true },
-  { gameId: "spider", mode: "4-suit", gameLabel: "Spider", modeLabel: "4 Suits", timed: true },
-] as const;
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.floor(milliseconds / 100);
-  const minutes = Math.floor(totalTenths / 600);
-  const seconds = Math.floor((totalTenths % 600) / 10);
-  const tenths = totalTenths % 10;
-  return `${minutes}:${String(seconds).padStart(2, "0")}.${tenths}`;
-}
+import { formatTime } from "../lib/format";
+import { ACHIEVEMENT_MODES, isSameMode } from "../lib/achievements";
 
 export function Profile() {
   const { getToken } = useAuth();
@@ -113,9 +98,7 @@ export function Profile() {
         {ACHIEVEMENT_MODES.map((achievement) => {
           const best = profile?.personalBests.find(
             (entry) =>
-              entry.gameId === achievement.gameId &&
-              (entry.mode === achievement.mode ||
-                (achievement.gameId === "spider" && achievement.mode === "1-suit" && entry.mode === "speed")),
+              entry.gameId === achievement.gameId && isSameMode(entry.gameId, entry.mode, achievement.mode),
           );
           const wins = profile?.rankedWins.find(
             (entry) => entry.gameId === achievement.gameId && entry.mode === achievement.mode,

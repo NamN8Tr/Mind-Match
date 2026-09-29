@@ -45,12 +45,20 @@ export interface GameRoomOptions {
   /** Wall-clock cap after the countdown ends; nobody solving in time is a draw. Default 30 minutes. */
   matchTimeoutMs?: number;
   /**
+   * Idle cap instead of a wall-clock one: the match ends only after this long
+   * with no accepted move from *either* player. Set it and `matchTimeoutMs` is
+   * ignored, so a long game is never cut off mid-play — only an abandoned one.
+   */
+  idleTimeoutMs?: number;
+  /**
    * Ranked races normally forfeit a departed player. Spider instead keeps the
    * board alive for the remaining player and only draws when both have left.
    */
   departurePolicy?: "forfeit" | "continue-until-both-leave";
   /** Records a server-timed solve from this ranked room in the matching solo PB pool. */
   timedPersonalBestMode?: string;
+  /** Claims and pins an ahead-of-time board before synchronous engine state creation. */
+  prepareSeed?: (seed: string) => Promise<void>;
 }
 
 /**
@@ -68,9 +76,13 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
   const joinDeadlineMs = roomOptions.joinDeadlineMs ?? JOIN_DEADLINE_MS;
   const reconnectGraceSeconds = roomOptions.reconnectGraceSeconds ?? RECONNECT_GRACE_SECONDS;
   const countdownMs = roomOptions.countdownMs ?? COUNTDOWN_MS;
+  const idleTimeoutMs = roomOptions.idleTimeoutMs;
   const matchTimeoutMs = roomOptions.matchTimeoutMs ?? 30 * 60_000;
+  /** The initial budget, and — in idle mode — the window every move re-opens. */
+  const timeoutBudgetMs = idleTimeoutMs ?? matchTimeoutMs;
   const departurePolicy = roomOptions.departurePolicy ?? "forfeit";
   const timedPersonalBestMode = roomOptions.timedPersonalBestMode;
+  const prepareSeed = roomOptions.prepareSeed;
 
   return class GameRoom extends Room {
     maxClients = 2;
@@ -92,10 +104,13 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
     private countdownEndsAt?: number;
     private matchStartedAt?: number;
     private matchDeadlineAt?: number;
+    /** Idle mode only: when the last accepted move landed. */
+    private lastActivityAt?: number;
 
     async onCreate(options: GameRoomCreateOptions): Promise<void> {
       this.matchId = options.matchId;
       this.playerIds = options.playerIds;
+      await prepareSeed?.(options.seed);
       this.gameState = engine.generateInitialState(options.seed, options.playerIds);
       // A player mid-refresh briefly leaves the room with zero clients; don't
       // tear the match down underneath them. Every terminal path below
@@ -229,12 +244,11 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       }
       this.started = true;
       this.matchStartedAt = now;
-      this.matchDeadlineAt = this.matchStartedAt + matchTimeoutMs;
+      this.lastActivityAt = now;
+      this.matchDeadlineAt = now + timeoutBudgetMs;
       this.broadcast("phase", "active");
       this.broadcast("clock", { startedAt: this.matchStartedAt, deadlineAt: this.matchDeadlineAt, serverNow: Date.now() });
-      this.matchTimeoutTimer = this.clock.setTimeout(() => {
-        void this.handleMatchTimeout();
-      }, matchTimeoutMs);
+      this.armMatchTimeout(timeoutBudgetMs);
     }
 
     private handleMove(client: Client, move: Move): void {
@@ -255,6 +269,10 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       }
 
       this.gameState = engine.applyMove(this.gameState, move, userId).state;
+      if (idleTimeoutMs !== undefined) {
+        this.lastActivityAt = Date.now();
+        this.matchDeadlineAt = this.lastActivityAt + idleTimeoutMs;
+      }
       this.broadcastState();
 
       if (engine.isTerminal(this.gameState)) {
@@ -262,8 +280,25 @@ export function createGameRoom<State, Move>(engine: GameEngine<State, Move>, roo
       }
     }
 
+    private armMatchTimeout(delayMs: number): void {
+      this.matchTimeoutTimer?.clear();
+      this.matchTimeoutTimer = this.clock.setTimeout(() => {
+        this.handleMatchTimeout();
+      }, delayMs);
+    }
+
     private handleMatchTimeout(): void {
       if (this.finished || engine.isTerminal(this.gameState)) return;
+      if (idleTimeoutMs !== undefined) {
+        // Moves roll the idle window forward without touching the timer, so a
+        // firing here may just mean the window moved. Re-arm for what is left
+        // of it and only conclude once both players have genuinely gone quiet.
+        const idleForMs = Date.now() - (this.lastActivityAt ?? Date.now());
+        if (idleForMs < idleTimeoutMs) {
+          this.armMatchTimeout(idleTimeoutMs - idleForMs);
+          return;
+        }
+      }
       void this.concludeMatch(engine.getTimeoutResult?.(this.gameState) ?? { status: "draw", reason: "timeout" });
     }
 

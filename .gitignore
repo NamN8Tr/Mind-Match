@@ -1,6 +1,8 @@
 node_modules/
+tools/spider-solver/bin/
 dist/
 .next/
+next-env.d.ts
 .turbo/
 *.tsbuildinfo
 .env

@@ -7,7 +7,7 @@ import type {
   SpiderSuit,
 } from "@smart-rot/shared-types";
 import Image from "next/image";
-import { type DragEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type DragEvent, type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   findSpiderAutoMoveDestination,
   getSpiderHintMoves,
@@ -22,25 +22,64 @@ interface Selection {
   moveCount: number;
 }
 
-function setStackDragImage(event: DragEvent<HTMLButtonElement>, cardIndex: number): void {
+/**
+ * How much taller a column gets per extra card, as a fraction of one card's
+ * height. These mirror the negative margins in `.spider-card + .spider-card`
+ * (-113% / -99% of card width, and a card is 0.71 as wide as it is tall), and
+ * must be kept in step with them: the CSS divides the board's height by the
+ * tallest column measured here to pick a card size that always fits.
+ */
+const UNITS_AFTER_FACE_DOWN = 0.2;
+const UNITS_AFTER_FACE_UP = 0.3;
+/** Keeps cards a sane size early on, when every column is short. */
+const MIN_TALL_UNITS = 2.9;
+
+function tallestColumnInCardHeights(columns: SpiderCard[][]): number {
+  let tallest = MIN_TALL_UNITS;
+  for (const column of columns) {
+    if (column.length === 0) continue;
+    let units = 1;
+    for (let index = 1; index < column.length; index += 1) {
+      units += column[index - 1]!.faceUp ? UNITS_AFTER_FACE_UP : UNITS_AFTER_FACE_DOWN;
+    }
+    if (units > tallest) tallest = units;
+  }
+  return tallest;
+}
+
+function setStackDragImage(event: DragEvent<HTMLButtonElement>, cardIndex: number): HTMLDivElement | null {
   const column = event.currentTarget.parentElement;
-  if (!column) return;
+  if (!column) return null;
 
   const cards = Array.from(column.querySelectorAll<HTMLElement>(":scope > .spider-card")).slice(cardIndex);
-  if (cards.length === 0) return;
+  if (cards.length === 0) return null;
 
   const preview = document.createElement("div");
   const cardRect = event.currentTarget.getBoundingClientRect();
   preview.className = "spider-drag-preview";
   preview.setAttribute("aria-hidden", "true");
   preview.style.width = `${cardRect.width}px`;
-  cards.forEach((card) => preview.append(card.cloneNode(true)));
+  preview.style.left = `${cardRect.left}px`;
+  preview.style.top = `${cardRect.top}px`;
+  cards.forEach((card) => {
+    const clone = card.cloneNode(true) as HTMLElement;
+    clone.classList.remove("selected", "dragging", "hint-source");
+    clone.removeAttribute("id");
+    preview.append(clone);
+  });
   document.body.append(preview);
 
   const offsetX = Math.max(0, Math.min(cardRect.width, event.clientX - cardRect.left));
   const offsetY = Math.max(0, Math.min(cardRect.height, event.clientY - cardRect.top));
   event.dataTransfer.setDragImage(preview, offsetX, offsetY);
-  window.setTimeout(() => preview.remove(), 0);
+  // Chromium must paint the custom element once before it can rasterize the
+  // complete stack. Moving it away on the next frame prevents a second ghost
+  // from remaining at the source while preserving the native drag image.
+  window.requestAnimationFrame(() => {
+    preview.style.left = "-10000px";
+    preview.style.top = "-10000px";
+  });
+  return preview;
 }
 
 function rankLabel(rank: number): string {
@@ -106,15 +145,20 @@ export function SpiderBoard({
   disabled,
   pending,
   showActions = true,
+  overlay,
   onMove,
   onLocalError,
+  onNotice,
 }: {
   player: SpiderPlayerView;
   disabled: boolean;
   pending: boolean;
   showActions?: boolean;
+  /** Rendered centred over the tableau — the end-of-game result panel. */
+  overlay?: ReactNode;
   onMove: (move: SpiderMove) => void;
   onLocalError: (message: string) => void;
+  onNotice: (message: string) => void;
 }) {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [dragging, setDragging] = useState<Selection | null>(null);
@@ -126,21 +170,23 @@ export function SpiderBoard({
   const previousCardRects = useRef(new Map<string, DOMRect>());
   const previousCardClones = useRef(new Map<string, HTMLButtonElement>());
   const previousStockLength = useRef(player.stock.length);
+  const dragPreviewElement = useRef<HTMLDivElement | null>(null);
   const nextStockDeal = useRef(new Map((player.stock[0] ?? []).map((card, index) => [card.id, index])));
   const stockPileElement = useRef<HTMLSpanElement | null>(null);
   const boardKey = `${player.moveCount}:${player.stock.length}:${player.completedRuns}`;
   const currentSelection = selection?.moveCount === player.moveCount ? selection : null;
   const currentDragging = dragging?.moveCount === player.moveCount ? dragging : null;
   const hints = useMemo(() => getSpiderHintMoves(player), [player]);
+  const tallUnits = useMemo(() => tallestColumnInCardHeights(player.columns), [player.columns]);
   const currentHint = hintState?.boardKey === boardKey && !hintState.recommendation && hints.length > 0
     ? hints[hintState.index % hints.length]
     : null;
-  const hintMessage = currentHint
-    ? hintDescription(currentHint)
-    : hintState?.boardKey === boardKey
-      ? hintState.recommendation
-      : null;
 
+  function finishDragging(): void {
+    dragPreviewElement.current?.remove();
+    dragPreviewElement.current = null;
+    setDragging(null);
+  }
   useLayoutEffect(() => {
     const currentRects = new Map<string, DOMRect>();
     const currentClones = new Map<string, HTMLButtonElement>();
@@ -347,7 +393,7 @@ export function SpiderBoard({
         { transform: `translate3d(${deltaX}px, ${deltaY}px, 0) scale(1)`, opacity: 1, offset: 0.9 },
         { transform: `translate3d(${deltaX}px, ${deltaY}px, 0) scale(0.98)`, opacity: 0, offset: 1 },
       ],
-      { duration: 1_100, easing: "cubic-bezier(0.2, 0.82, 0.2, 1)", fill: "forwards" },
+      { duration: 1_750, easing: "cubic-bezier(0.2, 0.82, 0.2, 1)", fill: "forwards" },
     );
     const removePreview = () => {
       sourceElements.forEach((element) => element.classList.remove("hint-source"));
@@ -398,14 +444,19 @@ export function SpiderBoard({
   function requestHint(): void {
     if (disabled || pending) return;
     const emptyColumn = player.columns.findIndex((column) => column.length === 0);
-    setHintAnimationNonce((current) => current + 1);
-    setHintState((current) => nextSpiderHintCursor(
-      current,
+    const nextHintState = nextSpiderHintCursor(
+      hintState,
       boardKey,
       hints.length,
       emptyColumn,
       player.stock.length,
-    ));
+    );
+    const nextHint = !nextHintState.recommendation && hints.length > 0
+      ? hints[nextHintState.index % hints.length]
+      : null;
+    setHintAnimationNonce((current) => current + 1);
+    setHintState(nextHintState);
+    onNotice(nextHint ? hintDescription(nextHint) : nextHintState.recommendation ?? "No hint available.");
   }
 
   return (
@@ -428,7 +479,6 @@ export function SpiderBoard({
               ))
             )}
           </div>
-          <strong>{player.completedRuns}/8 runs</strong>
         </div>
 
         <button
@@ -458,7 +508,12 @@ export function SpiderBoard({
         </button>
       </div>
 
-      <div className="spider-board" aria-label="Spider tableau">
+      <div className="spider-board-stage">
+      <div
+        className="spider-board"
+        aria-label="Spider tableau"
+        style={{ "--spider-tall-units": tallUnits.toFixed(3) } as CSSProperties}
+      >
         {player.columns.map((column, columnIndex) => {
           return (
             <div
@@ -474,7 +529,7 @@ export function SpiderBoard({
               onDrop={(event) => {
                 event.preventDefault();
                 submitDestination(columnIndex);
-                setDragging(null);
+                finishDragging();
               }}
             >
               {column.length === 0 ? (
@@ -514,11 +569,12 @@ export function SpiderBoard({
                         }
                         event.dataTransfer.effectAllowed = "move";
                         event.dataTransfer.setData("text/plain", `${columnIndex}:${cardIndex}`);
-                        setStackDragImage(event, cardIndex);
+                        dragPreviewElement.current?.remove();
+                        dragPreviewElement.current = setStackDragImage(event, cardIndex);
                         setSelection({ column: columnIndex, cardIndex, moveCount: player.moveCount });
                         setDragging({ column: columnIndex, cardIndex, moveCount: player.moveCount });
                       }}
-                      onDragEnd={() => setDragging(null)}
+                      onDragEnd={finishDragging}
                     >
                       {card.faceUp ? (
                         <>
@@ -541,44 +597,40 @@ export function SpiderBoard({
           );
         })}
       </div>
+      {overlay}
+      </div>
 
-      {showActions && (
-        <div className="spider-action-bar" aria-label="Spider actions">
-          <button
-            type="button"
-            className="spider-action-button"
-            onClick={() => onMove({ type: "undo" })}
-            disabled={disabled || pending || !player.canUndo}
-          >
-            <span aria-hidden="true">↶</span>
-            <strong>Take back</strong>
-            <small>Unlimited</small>
-          </button>
-          <div className="spider-action-status" aria-live="polite">
-            {hintMessage ? (
-              <p className={currentHint ? "spider-hint-message" : "spider-hint-message recommendation"}>
-                <span aria-hidden="true">{currentHint ? "✦" : "↧"}</span> {hintMessage}
-                {hints.length > 1 && currentHint ? <small>Hint {hintState!.index + 1} of {hints.length}</small> : null}
-              </p>
-            ) : (
-              <p className="spider-board-help">
-                <strong>{player.completedRuns}/8 runs</strong>
-                <small>{currentSelection ? "Cards held" : `${player.moveCount} actions`}</small>
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            className="spider-action-button hint"
-            onClick={requestHint}
-            disabled={disabled || pending}
-          >
-            <span aria-hidden="true">✦</span>
-            <strong>Hint</strong>
-            <small>Unlimited</small>
-          </button>
+      {/*
+        * Kept mounted but inert once the game is over, so the tableau does not
+        * resize underneath the result panel that covers it.
+        */}
+      <div className="spider-action-bar" aria-label="Spider controls" inert={!showActions}>
+        <button
+          type="button"
+          className="spider-action-button"
+          onClick={() => onMove({ type: "undo" })}
+          disabled={disabled || pending || !player.canUndo}
+        >
+          <span aria-hidden="true">↶</span>
+          <strong>Take back</strong>
+          <small>Unlimited</small>
+        </button>
+        <div className="spider-action-status" aria-live="polite">
+          <p className="spider-board-help">
+            <strong>{player.moveCount} {player.moveCount === 1 ? "move" : "moves"}</strong>
+          </p>
         </div>
-      )}
+        <button
+          type="button"
+          className="spider-action-button hint"
+          onClick={requestHint}
+          disabled={disabled || pending}
+        >
+          <span aria-hidden="true">✦</span>
+          <strong>Hint</strong>
+          <small>Unlimited</small>
+        </button>
+      </div>
     </div>
   );
 }

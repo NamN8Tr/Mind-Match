@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { Client, type Room, type SeatReservation } from "@colyseus/sdk";
-import { generateSolvableSpiderDeal, VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
+import { generateVerifiedSpiderDeal, VALID_GUESSES, wordleEngine, wordleFewestGuessesEngine } from "@smart-rot/game-engines";
 import type {
   MatchOpponentInfo,
   MatchResult,
@@ -540,7 +540,7 @@ test("Spider gives both players the same solvable board and a single departure i
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(prematureResult, null, "leaving Spider must not immediately award the opponent a win");
 
-  for (const move of generateSolvableSpiderDeal(seed, "4-suit").solution) roomB.send("move", move);
+  for (const move of generateVerifiedSpiderDeal(seed, "4-suit").solution) roomB.send("move", move);
   const outcome = await result;
   observeResult();
   assert.equal(outcome.result.status, "win");

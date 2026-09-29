@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
-#
-# loggin: smartrot-player-one+clerk_test@example.com
-# code: 424242
-#
-# 
 # Launch the whole Smart Rot dev stack:
-#   Postgres + Redis (docker compose, or whatever is already listening)
+#   C++ Spider solver worker (tools/spider-solver)
+#   -> Postgres + Redis (docker compose, or whatever is already listening)
 #   -> Prisma client + migrations
 #   -> Fastify REST :4000 + Colyseus WS :4001
 #   -> Next.js :3000
+#
+# Sign in as a fixed Clerk test user, e.g. smartrot-player-one+clerk_test@example.com
+# (or player-two), with verification code 424242. See docs/PROJECT_CONTEXT.md.
 #
 # Ctrl-C stops everything it started.
 #
@@ -108,6 +107,13 @@ command -v pnpm >/dev/null || die "pnpm not found — npm i -g pnpm@11"
 node_major=$(node -p 'process.versions.node.split(".")[0]')
 [[ $node_major -ge 20 ]] || die "node >= 20 required, found $(node -v)"
 ok "node $(node -v), pnpm $(pnpm -v)"
+
+if [[ $RUN_SERVER -eq 1 ]]; then
+  command -v c++ >/dev/null || die "C++17 compiler not found — required for the Spider board worker"
+  step "Building Spider solver worker"
+  sh tools/spider-solver/build.sh
+  ok "Spider solver worker ready"
+fi
 
 # ------------------------------------------------------------------------ env
 step "Checking env files"

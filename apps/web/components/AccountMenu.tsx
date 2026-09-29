@@ -16,17 +16,10 @@ import {
 } from "@clerk/ui/experimental";
 import { useEffect, useRef, useState } from "react";
 import { deleteMe, getMe, type MeResponse, updateUsername } from "../lib/api";
+import { formatTime } from "../lib/format";
+import { ACHIEVEMENT_MODES, isSameMode } from "../lib/achievements";
 
 type AccountView = "profile" | "achievements";
-
-const ACHIEVEMENT_MODES = [
-  { gameId: "wordle", mode: "speed", gameLabel: "Wordle", modeLabel: "Speed", timed: true },
-  { gameId: "wordle", mode: "fewest-guesses", gameLabel: "Wordle", modeLabel: "Fewest Guesses", timed: false },
-  { gameId: "spider", mode: "1-suit", gameLabel: "Spider", modeLabel: "1 Suit", timed: true },
-  { gameId: "spider", mode: "2-suit", gameLabel: "Spider", modeLabel: "2 Suits", timed: true },
-  { gameId: "spider", mode: "3-suit", gameLabel: "Spider", modeLabel: "3 Suits", timed: true },
-  { gameId: "spider", mode: "4-suit", gameLabel: "Spider", modeLabel: "4 Suits", timed: true },
-] as const;
 
 function ProfileIcon() {
   return (
@@ -49,13 +42,6 @@ function TrophyIcon() {
       />
     </svg>
   );
-}
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.floor(milliseconds / 100);
-  const minutes = Math.floor(totalTenths / 600);
-  const seconds = Math.floor((totalTenths % 600) / 10);
-  return `${minutes}:${String(seconds).padStart(2, "0")}.${totalTenths % 10}`;
 }
 
 function formatGame(gameId: string): string {
@@ -138,8 +124,9 @@ function AchievementsPanel() {
 
   const additionalBests = profile?.personalBests.filter(
     (best) =>
-      !ACHIEVEMENT_MODES.some((achievement) => achievement.gameId === best.gameId && achievement.mode === best.mode) &&
-      !(best.gameId === "spider" && best.mode === "speed"),
+      !ACHIEVEMENT_MODES.some(
+        (achievement) => achievement.gameId === best.gameId && isSameMode(best.gameId, best.mode, achievement.mode),
+      ),
   );
 
   return (
@@ -155,9 +142,7 @@ function AchievementsPanel() {
           {ACHIEVEMENT_MODES.map((achievement) => {
             const best = profile.personalBests.find(
               (entry) =>
-                entry.gameId === achievement.gameId &&
-                (entry.mode === achievement.mode ||
-                  (achievement.gameId === "spider" && achievement.mode === "1-suit" && entry.mode === "speed")),
+                entry.gameId === achievement.gameId && isSameMode(entry.gameId, entry.mode, achievement.mode),
             );
             const wins = profile.rankedWins.find(
               (entry) => entry.gameId === achievement.gameId && entry.mode === achievement.mode,

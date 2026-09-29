@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GameRuleViolation, SPIDER_MODES, type SpiderStateView } from "@smart-rot/shared-types";
-import { generateSolvableSpiderDeal, spiderEngines, spiderOneSuitEngine } from "./engine.js";
+import {
+  generateVerifiedSpiderDeal,
+  getSpiderReadyBoardCount,
+  getBundledVerifiedSpiderDeals,
+  registerSpiderDealAssignment,
+  SPIDER_READY_POOL_SIZE,
+  spiderEngines,
+  spiderOneSuitEngine,
+  verifySpiderDeal,
+} from "./engine.js";
 
 test("Spider deals are deterministic, identical for both players, and independently cloned", () => {
   const first = spiderOneSuitEngine.generateInitialState("shared-board", ["p1", "p2"]);
@@ -17,29 +26,75 @@ test("Spider deals are deterministic, identical for both players, and independen
 
 test("different seeds create varied deals", () => {
   const deals = new Set(
-    Array.from({ length: 12 }, (_, index) => JSON.stringify(generateSolvableSpiderDeal(`seed-${index}`).columns)),
+    Array.from({ length: 12 }, (_, index) => JSON.stringify(generateVerifiedSpiderDeal(`seed-${index}`).columns)),
   );
   assert.ok(deals.size > 1);
 });
 
-test("solvable openings avoid the old fixed set of immediately helpful moves", () => {
+test("claiming deals immediately replenishes every ready pool", () => {
+  for (const mode of SPIDER_MODES) {
+    assert.equal(getSpiderReadyBoardCount(mode), SPIDER_READY_POOL_SIZE);
+    for (let index = 0; index < SPIDER_READY_POOL_SIZE * 2; index += 1) {
+      generateVerifiedSpiderDeal(`${mode}-ready-pool-${index}`, mode);
+      assert.equal(getSpiderReadyBoardCount(mode), SPIDER_READY_POOL_SIZE);
+    }
+  }
+});
+
+test("every bundled witness passes the same verifier used by the background worker", () => {
+  for (const mode of SPIDER_MODES) {
+    const deals = getBundledVerifiedSpiderDeals(mode);
+    assert.equal(deals.length, SPIDER_READY_POOL_SIZE);
+    for (const deal of deals) assert.equal(verifySpiderDeal(deal, mode), true);
+  }
+});
+
+test("a persisted assignment is pinned to its room seed and independently cloned", () => {
+  const deal = getBundledVerifiedSpiderDeals("3-suit")[4]!;
+  registerSpiderDealAssignment("persisted-room", "3-suit", deal);
+  const first = generateVerifiedSpiderDeal("persisted-room", "3-suit");
+  const second = generateVerifiedSpiderDeal("persisted-room", "3-suit");
+  assert.deepEqual(first, deal);
+  assert.deepEqual(second, deal);
+  assert.notEqual(first.columns, second.columns);
+});
+
+test("the pool verifier rejects a corrupted solver witness", () => {
+  const deal = getBundledVerifiedSpiderDeals("1-suit")[0]!;
+  deal.solution[0] = { type: "move", fromColumn: 0, cardIndex: 999, toColumn: 1 };
+  assert.equal(verifySpiderDeal(deal, "1-suit"), false);
+});
+
+test("the pool verifier rejects a malformed deck even when every card id is unique", () => {
+  const deal = getBundledVerifiedSpiderDeals("2-suit")[0]!;
+  const changed = deal.stock[0]![0]!;
+  changed.rank = changed.rank === 13 ? 12 : changed.rank + 1;
+  assert.equal(verifySpiderDeal(deal, "2-suit"), false);
+});
+
+test("solvable openings look randomized while guaranteeing a small set of starting moves", () => {
   const expectedMaximums = {
-    "1-suit": 6,
-    "2-suit": 3.5,
-    "3-suit": 2.2,
-    "4-suit": 1.8,
+    "1-suit": 8.5,
+    "2-suit": 4.5,
+    "3-suit": 3.5,
+    "4-suit": 2.8,
   } as const;
   const expectedOrderedPairMaximums = {
-    "1-suit": 15,
-    "2-suit": 15,
-    "3-suit": 14.5,
-    "4-suit": 14,
+    "1-suit": 30,
+    "2-suit": 29,
+    "3-suit": 29,
+    "4-suit": 28,
   } as const;
 
   for (const mode of SPIDER_MODES) {
     const openings = Array.from({ length: 24 }, (_, index) => {
-      const deal = generateSolvableSpiderDeal(`${mode}-difficulty-${index}`, mode);
+      const deal = generateVerifiedSpiderDeal(`${mode}-difficulty-${index}`, mode);
       const tops = deal.columns.map((column) => column.at(-1)!);
+      const rankCounts = new Map<number, number>();
+      tops.forEach((card) => rankCounts.set(card.rank, (rankCounts.get(card.rank) ?? 0) + 1));
+      const movableSources = tops.filter((card, source) =>
+        tops.some((destination, target) => source !== target && destination.rank === card.rank + 1),
+      ).length;
       const helpfulSources = tops.filter((card, source) =>
         tops.some((destination, target) =>
           source !== target &&
@@ -54,14 +109,29 @@ test("solvable openings avoid the old fixed set of immediately helpful moves", (
         }).length,
         0,
       );
-      return { helpfulSources, orderedPairs, solutionLength: deal.solution.length };
+      return {
+        rankVariety: rankCounts.size,
+        largestRankGroup: Math.max(...rankCounts.values()),
+        movableSources,
+        helpfulSources,
+        orderedPairs,
+        solutionLength: deal.solution.length,
+        firstStockDraw: deal.solution.findIndex((move) => move.type === "draw"),
+      };
     });
     const helpfulAverage = openings.reduce((total, opening) => total + opening.helpfulSources, 0) / openings.length;
+    const rankVarietyAverage = openings.reduce((total, opening) => total + opening.rankVariety, 0) / openings.length;
+    const largestRankGroupAverage = openings.reduce((total, opening) => total + opening.largestRankGroup, 0) / openings.length;
     const orderedPairAverage = openings.reduce((total, opening) => total + opening.orderedPairs, 0) / openings.length;
     const solutionAverage = openings.reduce((total, opening) => total + opening.solutionLength, 0) / openings.length;
+    const firstStockDrawAverage = openings.reduce((total, opening) => total + opening.firstStockDraw, 0) / openings.length;
+    assert.ok(openings.every((opening) => opening.movableSources >= 2 && opening.movableSources <= 4), `${mode} did not guarantee two to four starting moves`);
+    assert.ok(rankVarietyAverage >= 6, `${mode} exposed only ${rankVarietyAverage} distinct ranks on average`);
+    assert.ok(largestRankGroupAverage < 3.5, `${mode} repeated one rank ${largestRankGroupAverage} times on average`);
     assert.ok(helpfulAverage < expectedMaximums[mode], `${mode} exposed ${helpfulAverage} immediately helpful sources`);
     assert.ok(orderedPairAverage < expectedOrderedPairMaximums[mode], `${mode} preassembled ${orderedPairAverage} hidden pairs`);
-    assert.ok(solutionAverage >= 67, `${mode} proof path averaged only ${solutionAverage} actions`);
+    assert.ok(solutionAverage >= 67, `${mode} proof path averaged only ${solutionAverage} moves`);
+    assert.ok(firstStockDrawAverage < 35, `${mode} did not require stock until move ${firstStockDrawAverage} on average`);
   }
 });
 
@@ -96,7 +166,7 @@ test("every generated deal in every suit mode includes a legal solution", () => 
   for (const mode of SPIDER_MODES) {
     const engine = spiderEngines[mode];
     for (const seed of Array.from({ length: 40 }, (_, index) => `${mode}-solvable-${index}`)) {
-      const deal = generateSolvableSpiderDeal(seed, mode);
+      const deal = generateVerifiedSpiderDeal(seed, mode);
       let state = engine.generateInitialState(seed, ["p1", "p2"]);
       let stockDraws = 0;
       for (const move of deal.solution) {
@@ -168,7 +238,7 @@ test("multi-card moves must stay within one suit", () => {
 
 test("reset restores the shared opening board without changing the opponent", () => {
   const seed = "reset-board";
-  const deal = generateSolvableSpiderDeal(seed);
+  const deal = generateVerifiedSpiderDeal(seed);
   let state = spiderOneSuitEngine.generateInitialState(seed, ["p1", "p2"]);
   state = spiderOneSuitEngine.applyMove(state, deal.solution[0]!, "p1").state;
   assert.notDeepEqual(state.players.p1!.columns, state.initialColumns);
@@ -212,7 +282,7 @@ test("drawing from stock is allowed while a tableau column is empty", () => {
 
 test("take back reverses a move and restores the face-down card it exposed", () => {
   const seed = "move-undo";
-  const firstMove = generateSolvableSpiderDeal(seed).solution[0]!;
+  const firstMove = generateVerifiedSpiderDeal(seed).solution[0]!;
   let state = spiderOneSuitEngine.generateInitialState(seed, ["p1", "p2"]);
   const opening = state.players.p1!;
 

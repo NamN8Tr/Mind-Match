@@ -56,8 +56,15 @@ export default function SpiderMatchPage() {
 
     const createConnection = async (): Promise<MatchConnection> => {
       const token = await getToken();
-      const [profile, connected] = await Promise.all([getMe(token), connect(token)]);
-      return { room: connected, currentUserId: profile.id };
+      // allSettled, not all: a failed profile fetch must not strand a room that
+      // did connect — the error screen has no room to leave, so leave it here.
+      const [meResult, roomResult] = await Promise.allSettled([getMe(token), connect(token)]);
+      if (meResult.status === "rejected") {
+        if (roomResult.status === "fulfilled") void roomResult.value.leave().catch(() => undefined);
+        throw meResult.reason;
+      }
+      if (roomResult.status === "rejected") throw roomResult.reason;
+      return { room: roomResult.value, currentUserId: meResult.value.id };
     };
 
     let connection = connectionRef.current;

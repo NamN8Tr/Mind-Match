@@ -39,8 +39,9 @@ export class GameRuleViolation extends Error {
  * and match-orchestration code depend only on this interface and never on a
  * specific game's rules, so new games can be added without touching those layers.
  *
- * State must be fully server-authoritative and JSON-serializable (it is synced to
- * clients via Colyseus room state and persisted to Postgres as match history).
+ * State must be fully server-authoritative and JSON-serializable (each client is
+ * sent its own serializeStateForPlayer view as a Colyseus message, and the state
+ * is persisted to Postgres as match history).
  */
 export interface GameEngine<State, Move> {
   readonly gameId: GameId;

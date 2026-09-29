@@ -14,7 +14,9 @@ import { useEffect, useRef, useState } from "react";
 import { clearActiveMatch } from "../lib/match-storage";
 import { GameHelpDialog } from "./GameHelpDialog";
 import { SpiderBoard } from "./SpiderBoard";
+import { SpiderHelpSections } from "./SpiderHelp";
 import { WordleNotice, type WordleNoticeMessage } from "./WordleNotice";
+import { formatTime } from "../lib/format";
 
 interface ClockMessage {
   startedAt: number;
@@ -39,11 +41,6 @@ interface RankedResultMessage {
   result: MatchResult;
   ratings: Record<PlayerId, { before: number; after: number }> | null;
   persisted: boolean;
-}
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.max(0, Math.floor(milliseconds / 100));
-  return `${Math.floor(totalTenths / 600)}:${String(Math.floor((totalTenths % 600) / 10)).padStart(2, "0")}.${totalTenths % 10}`;
 }
 
 export function SpiderGame({
@@ -76,6 +73,13 @@ export function SpiderGame({
   const keepPlayingRef = useRef<HTMLButtonElement | null>(null);
 
   const gameOver = rankedResult !== null || soloResult !== null;
+
+  // The board sizes itself to the viewport, so the page shell gives up its
+  // generous margins for as long as a match is on screen.
+  useEffect(() => {
+    document.body.classList.add("spider-playing");
+    return () => document.body.classList.remove("spider-playing");
+  }, []);
 
   useEffect(() => {
     moveCountRef.current = null;
@@ -209,6 +213,20 @@ export function SpiderGame({
       ? "Both players left the race"
       : rankedMatchResult?.reason?.replaceAll("-", " ");
 
+  const resultPanel = gameOver ? (
+    <div className="spider-result-overlay" role="status" aria-live="polite">
+      <div className="match-result spider-result">
+        <h2>{resultTitle}</h2>
+        {soloResult?.solved && soloResult.elapsedMs !== null && <p className="muted">Time: {formatTime(soloResult.elapsedMs)}</p>}
+        {soloResult?.bestTimeMs !== null && soloResult?.bestTimeMs !== undefined && <p className="muted">Personal best: {formatTime(soloResult.bestTimeMs)}</p>}
+        {resultReason && <p className="muted">{resultReason}</p>}
+        {myRating && <p className="muted">Rating: {Math.round(myRating.before)} → {Math.round(myRating.after)} ({myRating.after - myRating.before >= 0 ? "+" : ""}{Math.round(myRating.after - myRating.before)})</p>}
+        {((soloResult && !soloResult.persisted) || (rankedResult && !rankedResult.persisted)) && <p className="error-text">The server could not save this result.</p>}
+        <button className="btn-secondary" onClick={onExit}>Back to Spider</button>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="card match-card spider-match-card">
       {phase === "countdown" && !gameOver && <div className="round-countdown" role="status" aria-live="assertive"><span>Get ready</span><strong key={countdownNumber}>{countdownNumber}</strong></div>}
@@ -234,12 +252,21 @@ export function SpiderGame({
       {opponentLeft && !gameOver && <p className="spider-departure-note">Your opponent left. You can still finish; if you leave too, the race is a draw.</p>}
 
       <div className="spider-progress" aria-label="Race progress">
-        <div><span>You</span><strong>{view.self.completedRuns}/{view.targetRuns}</strong><small>{view.self.moveCount} actions · {view.self.stock.length} deals left</small></div>
-        {kind === "ranked" && <div><span>{opponent?.displayName ?? "Opponent"}</span><strong>{view.opponent.completedRuns}/{view.targetRuns}</strong><small>{view.opponent.moveCount} actions · {view.opponent.remainingDeals} deals left</small></div>}
+        <div><span>You</span><strong>{view.self.moveCount} moves</strong><small>{view.self.stock.length} deals left</small></div>
+        {kind === "ranked" && <div><span>{opponent?.displayName ?? "Opponent"}</span><strong>{view.opponent.moveCount} moves</strong><small>{view.opponent.remainingDeals} deals left</small></div>}
       </div>
 
       <WordleNotice notice={notice} />
-      <SpiderBoard player={view.self} disabled={!canPlay} pending={pendingMove} showActions={!gameOver} onMove={submitMove} onLocalError={showLocalError} />
+      <SpiderBoard
+        player={view.self}
+        disabled={!canPlay}
+        pending={pendingMove}
+        showActions={!gameOver}
+        overlay={resultPanel}
+        onMove={submitMove}
+        onLocalError={showLocalError}
+        onNotice={showLocalError}
+      />
 
       {showingHelp && !gameOver && (
         <GameHelpDialog
@@ -247,37 +274,7 @@ export function SpiderGame({
           title="How to play Spider"
           onClose={() => setShowingHelp(false)}
         >
-          <section>
-            <h3>Goal</h3>
-            <p>Clear all eight complete, same-suit runs from King down to Ace. A finished run leaves the tableau automatically.</p>
-          </section>
-          <section>
-            <h3>Move cards</h3>
-            <ul>
-              <li>Tap a face-up card to make its best valid move: same suit first, then another suit, then an empty column, searching left to right.</li>
-              <li>Drag a card when you want to choose the destination yourself. A descending same-suit stack moves together.</li>
-              <li>You may place a card or stack on the next higher rank. Any card or valid stack may fill an empty column.</li>
-            </ul>
-          </section>
-          <section>
-            <h3>Stock, hints, and take backs</h3>
-            <ul>
-              <li>Click the stock pile above the tableau to deal one new card to every column, including empty columns.</li>
-              <li>Hints cycle through moves that reveal cards or build same-suit runs, then suggest an empty column or another deal.</li>
-              <li>Hints and take backs are unlimited.</li>
-            </ul>
-          </section>
-          <section>
-            <h3>This mode</h3>
-            <p>
-              {view.mode === "1-suit"
-                ? "All cards use one suit, so every descending stack can move together."
-                : `${view.mode.replace("-", " ")} mixes suits. Cards of different suits can be placed together, but only a same-suit descending stack moves as one.`}
-              {kind === "solo"
-                ? " Finish as quickly as possible to set a personal best."
-                : " Both players receive the same solvable board; the fastest clear wins. Leaving alone is not an automatic loss, and if both players leave the race is a draw."}
-            </p>
-          </section>
+          <SpiderHelpSections mode={view.mode} kind={kind} />
         </GameHelpDialog>
       )}
 
@@ -298,17 +295,6 @@ export function SpiderGame({
         </div>
       )}
 
-      {gameOver && (
-        <div className="match-result spider-result">
-          <h2>{resultTitle}</h2>
-          {soloResult?.solved && soloResult.elapsedMs !== null && <p className="muted">Time: {formatTime(soloResult.elapsedMs)}</p>}
-          {soloResult?.bestTimeMs !== null && soloResult?.bestTimeMs !== undefined && <p className="muted">Personal best: {formatTime(soloResult.bestTimeMs)}</p>}
-          {resultReason && <p className="muted">{resultReason}</p>}
-          {myRating && <p className="muted">Rating: {Math.round(myRating.before)} → {Math.round(myRating.after)} ({myRating.after - myRating.before >= 0 ? "+" : ""}{Math.round(myRating.after - myRating.before)})</p>}
-          {((soloResult && !soloResult.persisted) || (rankedResult && !rankedResult.persisted)) && <p className="error-text">The server could not save this result.</p>}
-          <button className="btn-secondary" onClick={onExit} style={{ marginTop: 16 }}>Back to Spider</button>
-        </div>
-      )}
     </div>
   );
 }

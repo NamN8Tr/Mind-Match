@@ -10,6 +10,10 @@ import { getMatchHistory, getMe, type MatchHistoryEntry, type MeResponse } from 
 import { getColyseusClient } from "../lib/colyseus";
 import { saveActiveMatch } from "../lib/match-storage";
 import { setPendingMatchRoom } from "../lib/pending-match";
+import { GameHelpDialog } from "./GameHelpDialog";
+import { SpiderHelpSections } from "./SpiderHelp";
+import { formatTime } from "../lib/format";
+import { isSameMode } from "../lib/achievements";
 
 type Phase = "idle" | "queueing" | "starting-solo";
 type PlayKind = "solo" | "ranked";
@@ -20,11 +24,6 @@ const SPIDER_VARIANTS: Array<{ mode: SpiderMode; title: string; suits: string; d
   { mode: "3-suit", title: "3 Suits", suits: "♠ ♥ ♦", description: "More planning and fewer interchangeable sequences." },
   { mode: "4-suit", title: "4 Suits", suits: "♠ ♥ ♦ ♣", description: "The full challenge with all four suits in play." },
 ];
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.floor(milliseconds / 100);
-  return `${Math.floor(totalTenths / 600)}:${String(Math.floor((totalTenths % 600) / 10)).padStart(2, "0")}.${totalTenths % 10}`;
-}
 
 function roomKey(mode: SpiderMode): string {
   return mode.replace("-", "_");
@@ -46,6 +45,7 @@ export function SpiderLobby() {
   const [history, setHistory] = useState<MatchHistoryEntry[]>([]);
   const [queueCount, setQueueCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showingHelp, setShowingHelp] = useState(false);
   const queueRoomRef = useRef<Room | null>(null);
   const queueCleanupRef = useRef<(() => void) | null>(null);
 
@@ -182,15 +182,28 @@ export function SpiderLobby() {
 
       <section className="wordle-lobby-header">
         <div>
-          <span className="eyebrow">Spider Sprint</span>
+          <span className="eyebrow">Spider</span>
           <h1>{selectedKind ? `Choose ${selectedKind === "solo" ? "a solo" : "a ranked"} challenge.` : "Clear eight runs. Fastest wins."}</h1>
           <p className="muted">
             {selectedKind
               ? "Choose how many suits are in the deal. Every variant is guaranteed solvable."
-              : "Pick Solo or Ranked first, then choose from 1-, 2-, 3-, or 4-suit Spider."}
+              : "Pick Solo or Ranked first, then choose from 1, 2, 3, or 4 suit Spider."}
           </p>
         </div>
+        <button type="button" className="match-help-button lobby-help-button" onClick={() => setShowingHelp(true)}>
+          <span aria-hidden="true">?</span> How to play
+        </button>
       </section>
+
+      {showingHelp && (
+        <GameHelpDialog
+          eyebrow={selectedKind ? (selectedKind === "solo" ? "Spider · Solo" : "Spider · Ranked") : "Spider"}
+          title="How to play Spider"
+          onClose={() => setShowingHelp(false)}
+        >
+          <SpiderHelpSections {...(selectedKind ? { kind: selectedKind } : {})} />
+        </GameHelpDialog>
+      )}
 
       {!selectedKind ? (
         <section className="mode-grid spider-mode-grid" aria-label="Spider play types">
@@ -216,8 +229,7 @@ export function SpiderLobby() {
               const rating = me?.ratings.find((entry) => entry.gameId === "spider" && entry.mode === variant.mode);
               const best = me?.personalBests.find(
                 (entry) =>
-                  entry.gameId === "spider" &&
-                  (entry.mode === variant.mode || (variant.mode === "1-suit" && entry.mode === "speed")),
+                  entry.gameId === "spider" && isSameMode("spider", entry.mode, variant.mode),
               );
               return (
                 <article className={`spider-variant-card spider-variant-${variant.mode}`} key={variant.mode}>

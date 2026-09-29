@@ -8,6 +8,7 @@ import { GameHelpDialog } from "./GameHelpDialog";
 import { WordleBoard } from "./WordleBoard";
 import { WordleKeyboard } from "./WordleKeyboard";
 import { WordleNotice, type WordleNoticeMessage } from "./WordleNotice";
+import { formatTime } from "../lib/format";
 
 interface ClockMessage {
   startedAt: number;
@@ -26,13 +27,6 @@ interface SyncedClock extends ClockMessage {
 
 interface SyncedCountdown extends CountdownMessage {
   offsetMs: number;
-}
-
-function formatTime(milliseconds: number): string {
-  const totalTenths = Math.max(0, Math.floor(milliseconds / 100));
-  const minutes = Math.floor(totalTenths / 600);
-  const seconds = Math.floor((totalTenths % 600) / 10);
-  return `${minutes}:${String(seconds).padStart(2, "0")}.${totalTenths % 10}`;
 }
 
 export function SoloMatch({ room, onExit }: { room: Room; onExit: () => void }) {
